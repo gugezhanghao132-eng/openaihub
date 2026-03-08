@@ -8,6 +8,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const {
+  bundledRuntimeRoot,
   packageVersion,
   runtimeRoot,
   getPlatformConfig,
@@ -115,6 +116,20 @@ async function acquireLock(lockPath, timeoutMs = 60000) {
   }
 }
 
+async function removePathWithRetry(targetPath, attempts = 5, delayMs = 400) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fsp.rm(targetPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!error || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code) || attempt === attempts) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+    }
+  }
+}
+
 async function extractArchive(archivePath, extractRoot, extractKind) {
   if (extractKind === 'zip' && process.platform === 'win32') {
     await runCommand('powershell.exe', [
@@ -152,11 +167,17 @@ function findExecutable(extractRoot, executableName) {
 async function ensureInstalled(options = {}) {
   const { quiet = false, force = false } = options;
   const platformConfig = getPlatformConfig();
-  const runtimeDir = path.join(runtimeRoot, platformConfig.runtimeKey);
+  const runtimeBaseDir = path.join(runtimeRoot, platformConfig.runtimeKey);
+  const runtimeDir = path.join(runtimeBaseDir, packageVersion);
   const executablePath = path.join(runtimeDir, platformConfig.executableRelativePath);
+  const bundledArchivePath = path.join(bundledRuntimeRoot, platformConfig.assetName);
+  const versionMarkerPath = path.join(runtimeDir, 'version.txt');
 
-  if (!force && fs.existsSync(executablePath)) {
-    return { executablePath, runtimeDir, downloaded: false };
+  if (!force && fs.existsSync(executablePath) && fs.existsSync(versionMarkerPath)) {
+    const installedVersion = fs.readFileSync(versionMarkerPath, 'utf8').trim();
+    if (installedVersion === packageVersion) {
+      return { executablePath, runtimeDir, downloaded: false };
+    }
   }
 
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'openaihub-npm-'));
@@ -177,10 +198,17 @@ async function ensureInstalled(options = {}) {
     await fsp.mkdir(extractRoot, { recursive: true });
     await fsp.mkdir(stageRoot, { recursive: true });
 
-    if (!quiet) {
-      log(`Downloading ${platformConfig.assetName}...`);
+    if (fs.existsSync(bundledArchivePath)) {
+      if (!quiet) {
+        log(`Using bundled runtime archive ${platformConfig.assetName}...`);
+      }
+      await fsp.copyFile(bundledArchivePath, archivePath);
+    } else {
+      if (!quiet) {
+        log(`Downloading ${platformConfig.assetName}...`);
+      }
+      await withRetry(() => downloadFile(platformConfig.assetDownloadUrl, archivePath), 3, 'Runtime download');
     }
-    await withRetry(() => downloadFile(platformConfig.assetDownloadUrl, archivePath), 3, 'Runtime download');
 
     if (!quiet) {
       log('Extracting runtime...');
@@ -193,8 +221,9 @@ async function ensureInstalled(options = {}) {
     }
 
     await fsp.cp(extractedRuntimeRoot, stageRoot, { recursive: true, force: true });
-    await fsp.rm(runtimeDir, { recursive: true, force: true });
-    await fsp.mkdir(runtimeRoot, { recursive: true });
+    await fsp.writeFile(path.join(stageRoot, 'version.txt'), `${packageVersion}\n`, 'utf8');
+    await removePathWithRetry(runtimeDir);
+    await fsp.mkdir(runtimeBaseDir, { recursive: true });
     await fsp.rename(stageRoot, runtimeDir);
 
     if (!quiet) {
