@@ -1,119 +1,170 @@
 # OpenAI Hub 1.1
 
-OpenAI Hub is a command-line launcher for users who manage multiple OpenClAW and OpenCode accounts.
+OpenAI Hub 是一个面向多账号用户的命令行启动器。
 
-Its job is to help you:
+它的核心作用不是替代 OpenClAW 或 OpenCode，而是把你的 GPT 账号整理成一个可管理的号池，然后把这些账号轮换给 OpenClAW 和 OpenCode 使用。
 
-- log in with your own user accounts
-- manage account rotation for OpenClAW and OpenCode
-- switch which account is currently active
-- choose whether you want to control both tools together or only one side
+你可以把它理解成一层“账号管理与切换桥接层”：
 
-In other words, OpenAI Hub is a bridge layer between your account pool and the host apps that actually consume those accounts.
+- 负责登录并保存你的账号
+- 负责维护账号池
+- 负责切换当前正在使用的账号
+- 负责把账号配置同步给 OpenClAW 和 OpenCode
+- 负责在进入主界面前先做初始化检测
 
-## Install
+## 下载或更新
 
-Preferred install command:
+现在推荐使用 npm 安装方式。
 
 ```bash
 npm install -g openaihub
 ```
 
-After install, open a new terminal and run:
+第一次下载用这条命令。
+
+后续更新也还是用这条命令，重复执行即可。
+
+安装完成后，重新打开终端，运行：
 
 ```bash
 openaihub
 ```
 
-or:
+或者使用缩写：
 
 ```bash
 OAH
 ```
 
-## Update
-
-Use the same command again:
-
-```bash
-npm install -g openaihub
-```
-
-## Uninstall
+## 卸载
 
 ```bash
 npm uninstall -g openaihub
 ```
 
-## Version
+## 版本
 
 ```bash
 openaihub --version
 ```
 
-## What OpenAI Hub does
+## 这个产品是干什么的
 
-OpenAI Hub is not a replacement for OpenClAW or OpenCode.
+OpenAI Hub 主要解决的是“一个人手里有多个 GPT 账号，需要把这些账号稳定轮换给 OpenClAW 和 OpenCode 去使用”的问题。
 
-It is a launcher and account-switching helper around them.
+它的主要用途是：
 
-It helps you:
+- 把多个 GPT 账号组成一个号池
+- 登录并保存这些账号
+- 查看当前账号状态
+- 在账号之间切换
+- 在需要的时候自动把账号切给 OpenClAW 和 OpenCode
 
-- initialize the environment before entering the main page
-- detect whether the required host apps are installed
-- guide you into the correct mode before initialization
-- switch the account/config used by OpenClAW and OpenCode
-- keep the workflow simple with one command and one mode-selection menu
+所以它更像是一个账号池调度器，而不是单独的聊天软件。
 
-If a required host app is missing, OpenAI Hub blocks entry and tells the user what needs to be installed first.
+## 使用前你需要准备什么
 
-## Startup modes
+### 1. 必须有 OpenClAW
 
-When you run `openaihub`, the launcher first shows a mode selection menu.
+这是必须项。
 
-### 1. Combined mode
+因为 OpenAI Hub 的登录链路依赖 OpenClAW 的目录结构和登录数据，所以不管你最后选择的是：
 
-- checks OpenClAW and OpenCode
-- switches both sides together
-- best for users who want one unified workflow
+- 综合模式
+- OpenCode 模式
+- OpenClAW 模式
 
-### 2. OpenCode mode
+初始化时都会检查 OpenClAW 相关目录。
 
-- checks OpenCode
-- still relies on the OpenClAW login path for authentication flow
-- switches only the OpenCode side
+程序当前会重点检测这些默认位置：
 
-### 3. OpenClAW mode
+- OpenClAW 根目录：`~/.openclaw`
+- OpenClAW 配置文件：`~/.openclaw/openclaw.json`
+- OpenClAW agent 目录：`~/.openclaw/agents`
+- 账号池文件：`~/.openclaw/openai-codex-accounts.json`
+- 程序状态文件：`~/.openclaw/openai-hub-state.json`
 
-- checks OpenClAW only
-- switches only the OpenClAW side
+如果缺少下面这些关键内容，程序会报错或阻止进入主页面：
 
-## Platform notes
+- `~/.openclaw/openclaw.json` 不存在
+- `~/.openclaw/agents` 不存在
+- `~/.openclaw/agents/*/agent` 目录没有建立
+- OpenClAW 配置里缺少程序要求的模型项
 
-- the npm install command format is the same on Windows and macOS
-- the current public npm package is verified on Windows x64
-- macOS packaging scripts are prepared and will use the same `npm install -g openaihub` style after the macOS runtime asset is published
+默认建议：
 
-## Runtime behavior
+- 让 OpenClAW 使用默认用户目录 `~/.openclaw`
+- 先正常安装并至少初始化一次 OpenClAW
+- 确保它已经生成自己的配置和 agent 目录
 
-- the npm wrapper downloads the packaged runtime automatically
-- npm runtime files are stored under the user directory
-- current runtime path on Windows: `%USERPROFILE%/.openaihub/npm-runtime`
-- if the runtime is missing, `openaihub` will try to restore it automatically on next launch
+### 2. 如果你要用 OpenCode 模式或综合模式，就还需要 OpenCode
 
-## Project layout
+这两种模式下，程序还会检查 OpenCode 的配置与认证文件。
 
-- `1.1/scripts/install.ps1`: Windows direct installer/update script
-- `1.1/scripts/uninstall.ps1`: Windows direct uninstall script
-- `1.1/scripts/install.sh`: macOS install scaffold
-- `1.1/scripts/uninstall.sh`: macOS uninstall scaffold
-- `1.1/scripts/build-macos.sh`: macOS packaging scaffold
-- `1.1/npm/`: npm package wrapper for `npm install -g openaihub`
+当前检测的默认位置是：
 
-## Current status
+- OpenCode 配置文件：`~/.config/opencode/opencode.json`
+- OpenCode 凭据文件：`~/.local/share/opencode/auth.json`
 
-- npm package published: `openaihub@1.1.0`
-- Windows npm install verified
-- commands verified: `openaihub`, `OAH`, `openaihub --version`
-- GitHub release Windows asset published
-- macOS runtime distribution is still being prepared for public verification
+如果缺少下面这些关键内容，程序会报错或阻止进入主页面：
+
+- `~/.config/opencode/opencode.json` 不存在
+- `~/.local/share/opencode/auth.json` 不存在
+- OpenCode 配置里缺少程序要求的模型项
+
+默认建议：
+
+- 让 OpenCode 使用默认目录
+- 先正常安装一次 OpenCode
+- 至少让 OpenCode 生成它自己的配置文件和认证文件
+
+## 启动模式说明
+
+当你运行 `openaihub` 后，程序不会直接进主页面，而是先弹出模式选择菜单。
+
+### 1. 综合模式
+
+- 检查 OpenClAW
+- 检查 OpenCode
+- 切号时两边一起切
+
+适合想统一管理两边账号的用户。
+
+### 2. OpenCode 模式
+
+- 检查 OpenClAW
+- 检查 OpenCode
+- 切号时只切 OpenCode
+
+虽然这个模式只控制 OpenCode，但因为登录链路还是依赖 OpenClAW，所以 OpenClAW 相关目录仍然必须存在。
+
+### 3. OpenClAW 模式
+
+- 只检查 OpenClAW
+- 切号时只切 OpenClAW
+
+适合只想管理 OpenClAW 这一侧的用户。
+
+## 平台说明
+
+- npm 安装命令的写法在 Windows 和 macOS 上是一致的
+- 当前公开 npm 包已经实际验证的是 Windows x64
+- macOS 脚本和打包流程已经准备好
+- macOS 公开运行时分发还在继续补充验证
+
+所以现在可以说安装命令形式是通用的，但当前已经实测通过的是 Windows 这一侧。
+
+## 程序运行时会做什么
+
+- npm 包会自动下载运行时
+- 运行时文件会放到用户目录
+- 当前 Windows 路径是：`%USERPROFILE%/.openaihub/npm-runtime`
+- 如果运行时文件丢失，程序下次启动会自动尝试恢复
+
+## 当前状态
+
+- npm 包已发布：`openaihub@1.1.0`
+- npm 安装命令已可直接使用
+- 已验证命令：`openaihub`、`OAH`、`openaihub --version`
+- GitHub Release 的 Windows 资产已发布
+- macOS 公开运行时分发仍在补充验证
