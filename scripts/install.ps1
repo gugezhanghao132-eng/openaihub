@@ -1,12 +1,24 @@
 $ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $InstallRoot = Join-Path $env:USERPROFILE '.openaihub'
 $BinRoot = Join-Path $InstallRoot 'bin'
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceRoot = Split-Path -Parent $ScriptRoot
-$SourcePackage = Join-Path $SourceRoot 'package'
-$SourceDist = Join-Path $SourceRoot 'dist\openaihub'
-$VersionFile = Join-Path $SourcePackage 'version.txt'
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath -and $MyInvocation -and $MyInvocation.MyCommand) {
+  $ScriptPath = $MyInvocation.MyCommand.Path
+}
+$ScriptRoot = $null
+$SourceRoot = $null
+$SourcePackage = $null
+$SourceDist = $null
+$VersionFile = $null
+if ($ScriptPath) {
+  $ScriptRoot = Split-Path -Parent $ScriptPath
+  $SourceRoot = Split-Path -Parent $ScriptRoot
+  $SourcePackage = Join-Path $SourceRoot 'package'
+  $SourceDist = Join-Path $SourceRoot 'dist\openaihub'
+  $VersionFile = Join-Path $SourcePackage 'version.txt'
+}
 $AlreadyInstalled = Test-Path (Join-Path $BinRoot 'openaihub.exe')
 $RepoOwner = 'gugezhanghao132-eng'
 $RepoName = 'openaihub'
@@ -51,27 +63,54 @@ function Get-VersionText {
   param(
     [string]$Fallback = 'latest'
   )
-  if (Test-Path $VersionFile) {
+  if ($VersionFile -and (Test-Path $VersionFile)) {
     return (Get-Content $VersionFile -Raw).Trim()
   }
   return $Fallback.TrimStart('v')
 }
 
+function Invoke-WithRetry {
+  param(
+    [scriptblock]$Action,
+    [int]$MaxAttempts = 3,
+    [int]$DelaySeconds = 2
+  )
+
+  $attempt = 0
+  while ($true) {
+    try {
+      return & $Action
+    } catch {
+      $attempt++
+      if ($attempt -ge $MaxAttempts) {
+        throw
+      }
+      Start-Sleep -Seconds $DelaySeconds
+    }
+  }
+}
+
 $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('openaihub-install-' + [guid]::NewGuid().ToString('N'))
 $PayloadRoot = Join-Path $TempRoot 'payload'
 $PayloadBinRoot = Join-Path $PayloadRoot 'bin'
-$RemoteMode = -not (Test-Path (Join-Path $SourceDist 'openaihub.exe'))
+$StageBinRoot = Join-Path $TempRoot 'bin-stage'
+$RemoteMode = $true
+if ($SourceDist) {
+  $RemoteMode = -not (Test-Path (Join-Path $SourceDist 'openaihub.exe'))
+}
 $VersionText = Get-VersionText
 
 Invoke-WithSpinner -Message 'Preparing install directory...' -Action {
   New-Item -ItemType Directory -Force -Path $using:InstallRoot | Out-Null
-  New-Item -ItemType Directory -Force -Path $using:BinRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $using:TempRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $using:PayloadRoot | Out-Null
+  New-Item -ItemType Directory -Force -Path $using:StageBinRoot | Out-Null
 }
 
 if ($RemoteMode) {
-  $ReleaseInfo = Invoke-RestMethod -Uri $LatestReleaseApi -Headers @{ 'User-Agent' = 'OpenAIHub-Installer' }
+  $ReleaseInfo = Invoke-WithRetry -Action {
+    Invoke-RestMethod -Uri $LatestReleaseApi -Headers @{ 'User-Agent' = 'OpenAIHub-Installer' }
+  }
   $VersionText = Get-VersionText -Fallback ([string]$ReleaseInfo.tag_name)
   $RemoteZipUrl = $null
   foreach ($asset in $ReleaseInfo.assets) {
@@ -85,7 +124,19 @@ if ($RemoteMode) {
   }
   $ZipPath = Join-Path $TempRoot $AssetName
   Invoke-WithSpinner -Message 'Downloading release package...' -Action {
-    Invoke-WebRequest -Uri $using:RemoteZipUrl -OutFile $using:ZipPath -UseBasicParsing
+    $attempt = 0
+    while ($true) {
+      try {
+        Invoke-WebRequest -Uri $using:RemoteZipUrl -OutFile $using:ZipPath -UseBasicParsing
+        break
+      } catch {
+        $attempt++
+        if ($attempt -ge 3) {
+          throw
+        }
+        Start-Sleep -Seconds 2
+      }
+    }
   }
   Invoke-WithSpinner -Message 'Extracting release package...' -Action {
     Expand-Archive -Path $using:ZipPath -DestinationPath $using:PayloadRoot -Force
@@ -100,19 +151,74 @@ if ($RemoteMode) {
 }
 
 Invoke-WithSpinner -Message 'Cleaning previous files...' -Action {
-  Get-Process -Name 'openaihub' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Remove-Item -Path (Join-Path $using:BinRoot 'openaihub.cmd') -Force -ErrorAction SilentlyContinue
+  $installRoot = $using:InstallRoot
+  $installRootPrefix = $installRoot.TrimEnd('\\') + '\\'
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.ExecutablePath -and $_.ExecutablePath.StartsWith($installRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } |
+    ForEach-Object {
+      Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
+    }
+  Start-Sleep -Milliseconds 300
+  Remove-Item -Path $using:StageBinRoot -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $using:StageBinRoot | Out-Null
   Remove-Item -Path (Join-Path $using:InstallRoot 'app') -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Invoke-WithSpinner -Message 'Copying bundled runtime...' -Action {
-  Copy-Item -Path (Join-Path $using:PayloadBinRoot '*') -Destination $using:BinRoot -Recurse -Force
+  $source = $using:PayloadBinRoot
+  $destination = $using:StageBinRoot
+  Get-ChildItem -Path $source -Recurse -Force | ForEach-Object {
+    $relativePath = $_.FullName.Substring($source.Length).TrimStart('\\')
+    $targetPath = Join-Path $destination $relativePath
+    if ($_.PSIsContainer) {
+      New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+      return
+    }
+
+    $targetDir = Split-Path -Parent $targetPath
+    if (-not (Test-Path $targetDir)) {
+      New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    }
+
+    $attempt = 0
+    while ($true) {
+      try {
+        [System.IO.File]::Copy($_.FullName, $targetPath, $true)
+        break
+      } catch {
+        $attempt++
+        if ($attempt -ge 10) {
+          throw
+        }
+        Start-Sleep -Milliseconds 500
+      }
+    }
+  }
 }
 
 Invoke-WithSpinner -Message 'Installing command aliases...' -Action {
-  $aliasPath = Join-Path $using:BinRoot 'OAH.cmd'
+  $aliasPath = Join-Path $using:StageBinRoot 'OAH.cmd'
   Set-Content -Path $aliasPath -Encoding ASCII -Value "@echo off`r`nsetlocal`r`nchcp 65001 >nul`r`n`"%~dp0openaihub.exe`" %*`r`n"
   Set-Content -Path (Join-Path $using:InstallRoot 'version.txt') -Value $using:VersionText -Encoding UTF8
+}
+
+Invoke-WithSpinner -Message 'Activating installed runtime...' -Action {
+  $stageBinRoot = $using:StageBinRoot
+  $liveBinRoot = $using:BinRoot
+  $backupBinRoot = Join-Path $using:InstallRoot ('bin-backup-' + [guid]::NewGuid().ToString('N'))
+
+  if (Test-Path $backupBinRoot) {
+    Remove-Item -Path $backupBinRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  if (Test-Path $liveBinRoot) {
+    Move-Item -Path $liveBinRoot -Destination $backupBinRoot -Force
+  }
+
+  Move-Item -Path $stageBinRoot -Destination $liveBinRoot -Force
+  Remove-Item -Path $backupBinRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Invoke-WithSpinner -Message 'Updating PATH...' -Action {
