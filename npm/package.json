@@ -1,6 +1,6 @@
 {
   "name": "openaihub",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "OpenAI Hub CLI installer and launcher",
   "license": "MIT",
   "os": [
@@ -19,6 +19,7 @@
   "files": [
     "bin",
     "lib",
+    "runtime",
     "scripts",
     "README.md"
   ],
