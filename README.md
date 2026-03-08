@@ -4,15 +4,15 @@ OpenAI Hub 是一个给 OpenClAW 和 OpenCode 使用的账号池启动器。
 
 它把多个 GPT 账号整理成统一账号池，让你可以用一个入口完成登录、管理、切换和同步，而不是在不同目录和不同工具之间来回手动改配置。
 
-如果你手里有多个 GPT 账号，要轮流给 OpenClAW 或 OpenCode 使用，OpenAI Hub 的价值就是把这些重复操作变成一次安装、一个命令、一个菜单。
+如果你手里有多个 GPT 账号，要轮流给 OpenClAW 或 OpenCode 使用，OpenAI Hub 的价值就是把这些重复操作收拢成一次安装、一个命令、一个统一入口。
 
-它解决的核心问题：
+你可以用它来：
 
-- 账号登录后如何统一保存
-- 多个账号如何组成稳定可用的号池
-- 当前账号如何快速切换
-- OpenClAW 和 OpenCode 两边如何同步生效
-- 启动前如何先检查环境，避免进了主界面才发现缺东西
+- 统一保存账号登录状态
+- 维护可切换的账号池
+- 一键切换当前账号
+- 同步 OpenClAW 和 OpenCode 的使用配置
+- 在进入主界面前先做环境检查
 
 一句话说清楚：
 
@@ -20,16 +20,13 @@ OpenAI Hub 是一个给 OpenClAW 和 OpenCode 使用的账号池启动器。
 
 ## 下载或更新
 
-推荐安装方式：
+推荐命令：
 
 ```bash
 npm install -g openaihub
 ```
 
 这是一条安装和更新通用命令。
-
-- 第一次安装用它
-- 后续更新也用它
 
 安装完成后，重新打开终端，运行：
 
@@ -43,54 +40,26 @@ openaihub
 OAH
 ```
 
-如果你不想用 npm，也可以根据平台使用直装方式。
+不想用 npm，也可以直接按平台安装：
 
-### 其他安装方式
-
-### 方式一：npm 安装（首选）
-
-```bash
-npm install -g openaihub
-```
-
-适用前提：
-
-- 电脑里已经有 `npm`
-- 适合想用统一安装命令的用户
-- Windows / macOS 的命令写法一致
-
-### 方式二：Windows 直装（不想装 npm 时可用）
+### Windows
 
 ```powershell
 irm https://raw.githubusercontent.com/gugezhanghao132-eng/openaihub/main/scripts/install.ps1 | iex
 ```
 
-适用前提：
-
-- Windows
-- 本机可用 PowerShell
-- 能联网访问 GitHub
-
-适合：
-
-- 不想先安装 npm 的 Windows 用户
-
-### 方式三：macOS 直装入口（curl）
+### macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gugezhanghao132-eng/openaihub/main/scripts/install.sh | sh
 ```
 
-适用前提：
-
-- macOS
-- 本机可用 `curl` 和 `sh`
-
 说明：
 
-- 这是 macOS 的直装入口形式
-- 当前仓库已经提供这条安装入口对应的脚本
-- macOS 运行时公开分发仍在继续补充验证，因此当前对外最稳的方案仍然是优先看 npm 安装
+- `npm` 是当前最推荐的安装方式
+- Windows 可以直接用 `irm`
+- macOS 可以用 `curl | sh` 作为直装入口
+- 当前已经完整实测通过的是 Windows 侧；macOS 直装链路仍在补充公开验证
 
 ## 为什么要用 OpenAI Hub
 
