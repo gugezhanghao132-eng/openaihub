@@ -5,7 +5,7 @@
 ```bash
 cd 1.1/npm
 npm pack
-npm install -g ./openaihub-1.1.1.tgz
+npm install -g ./openaihub-1.1.2.tgz
 openaihub --version
 OAH --version
 ```
