@@ -1,0 +1,37 @@
+name: Publish OpenAI Hub to npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'openaihub-v*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 1.1/npm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify package scripts
+        run: |
+          node --check lib/config.js
+          node --check lib/install.js
+          node --check lib/run.js
+          node --check scripts/postinstall.js
+
+      - name: Publish package
+        run: npm publish --access public
