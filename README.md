@@ -25,7 +25,9 @@ OpenAI Hub 是一个面向多账号用户的命令行启动器。
 
 ## 下载或更新
 
-现在推荐使用 npm 安装方式。
+当前提供三种安装入口：
+
+### 方式一：npm 安装（推荐，最像正式产品）
 
 ```bash
 npm install -g openaihub
@@ -34,6 +36,40 @@ npm install -g openaihub
 第一次下载用这条命令。
 
 后续更新也还是用这条命令，重复执行即可。
+
+适用前提：
+
+- 电脑里已经有 `npm`
+- 适合想用最简洁命令的用户
+
+### 方式二：Windows 直装（不想装 npm 时可用）
+
+```powershell
+irm https://raw.githubusercontent.com/gugezhanghao132-eng/openaihub/main/scripts/install.ps1 | iex
+```
+
+适用前提：
+
+- Windows
+- 本机可用 PowerShell
+- 能联网访问 GitHub
+
+### 方式三：macOS 直装入口（curl）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gugezhanghao132-eng/openaihub/main/scripts/install.sh | sh
+```
+
+适用前提：
+
+- macOS
+- 本机可用 `curl` 和 `sh`
+
+说明：
+
+- 这是 macOS 的直装入口形式
+- 当前仓库已经提供这条安装入口对应的脚本
+- macOS 运行时公开分发仍在继续补充验证，所以当前最稳的公开方式仍然是先看 npm 方案和 Windows 方案
 
 安装完成后，重新打开终端，运行：
 
@@ -81,9 +117,16 @@ npm install -g openaihub
 
 ### 第二步：安装 OpenAI Hub
 
+推荐优先使用：
+
 ```bash
 npm install -g openaihub
 ```
+
+如果你不想装 npm，也可以：
+
+- Windows 用 `irm ... | iex`
+- macOS 用 `curl ... | sh`
 
 ### 第三步：确认 OpenClAW / OpenCode 已经生成默认目录
 
