@@ -1,10 +1,19 @@
-# OpenAI Hub
+# OpenAI Hub 1.1
 
 OpenAI Hub is a command-line launcher for users who manage multiple OpenClAW and OpenCode accounts.
 
-It helps users log in with their own user accounts, manage account rotation, and switch which account is currently active for OpenClAW and OpenCode.
+Its job is to help you:
+
+- log in with your own user accounts
+- manage account rotation for OpenClAW and OpenCode
+- switch which account is currently active
+- choose whether you want to control both tools together or only one side
+
+In other words, OpenAI Hub is a bridge layer between your account pool and the host apps that actually consume those accounts.
 
 ## Install
+
+Preferred install command:
 
 ```bash
 npm install -g openaihub
@@ -23,6 +32,8 @@ OAH
 ```
 
 ## Update
+
+Use the same command again:
 
 ```bash
 npm install -g openaihub
@@ -51,7 +62,7 @@ It helps you:
 - initialize the environment before entering the main page
 - detect whether the required host apps are installed
 - guide you into the correct mode before initialization
-- switch the account or config used by OpenClAW and OpenCode
+- switch the account/config used by OpenClAW and OpenCode
 - keep the workflow simple with one command and one mode-selection menu
 
 If a required host app is missing, OpenAI Hub blocks entry and tells the user what needs to be installed first.
@@ -90,12 +101,14 @@ When you run `openaihub`, the launcher first shows a mode selection menu.
 - current runtime path on Windows: `%USERPROFILE%/.openaihub/npm-runtime`
 - if the runtime is missing, `openaihub` will try to restore it automatically on next launch
 
-## Direct Windows installer
+## Project layout
 
-For users who want the direct PowerShell installer, the repo still keeps:
-
-- `scripts/install.ps1`
-- `scripts/uninstall.ps1`
+- `1.1/scripts/install.ps1`: Windows direct installer/update script
+- `1.1/scripts/uninstall.ps1`: Windows direct uninstall script
+- `1.1/scripts/install.sh`: macOS install scaffold
+- `1.1/scripts/uninstall.sh`: macOS uninstall scaffold
+- `1.1/scripts/build-macos.sh`: macOS packaging scaffold
+- `1.1/npm/`: npm package wrapper for `npm install -g openaihub`
 
 ## Current status
 
