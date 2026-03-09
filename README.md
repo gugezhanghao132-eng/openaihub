@@ -241,7 +241,7 @@ macOS 用户同样按这个默认目录检测：
 
 ## 当前状态
 
-- npm 包已发布：`openaihub@1.1.2`
+- npm 包已发布：`openaihub@1.1.3`
 - npm 安装命令已可直接使用
 - 已验证命令：`openaihub`、`OAH`、`openaihub --version`
 - GitHub Release 的 Windows 资产已发布
