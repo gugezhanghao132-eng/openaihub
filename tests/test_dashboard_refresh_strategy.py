@@ -336,6 +336,79 @@ class DashboardRefreshStrategyTests(unittest.TestCase):
             blocked_row = next(row for row in rows if row["alias"] == "blocked")
             self.assertGreater(int(blocked_row.get("_authBlockedUntilMs") or 0), now_ms)
 
+    def test_force_full_refresh_fetches_all_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            write_store(
+                root,
+                "current",
+                {
+                    "current": make_account("current"),
+                    "due": make_account("due"),
+                    "cached": make_account("cached"),
+                },
+            )
+            now_ms = MODULE.current_time_ms()
+            previous_rows = [
+                make_previous_row(
+                    "current",
+                    is_current=True,
+                    next_refresh_at_ms=now_ms - 1,
+                    remaining_5h=18.0,
+                    remaining_7d=25.0,
+                    reset_5h_ms=now_ms + 20 * 60 * 1000,
+                    reset_7d_ms=now_ms + 2 * 86400 * 1000,
+                ),
+                make_previous_row(
+                    "due",
+                    is_current=False,
+                    next_refresh_at_ms=now_ms + 60 * 60 * 1000,
+                    remaining_5h=92.0,
+                    remaining_7d=88.0,
+                    reset_5h_ms=now_ms + 4 * 3600 * 1000,
+                    reset_7d_ms=now_ms + 5 * 86400 * 1000,
+                ),
+                make_previous_row(
+                    "cached",
+                    is_current=False,
+                    next_refresh_at_ms=now_ms + 60 * 60 * 1000,
+                    remaining_5h=95.0,
+                    remaining_7d=90.0,
+                    reset_5h_ms=now_ms + 4 * 3600 * 1000,
+                    reset_7d_ms=now_ms + 5 * 86400 * 1000,
+                ),
+            ]
+            fetch_calls: list[str] = []
+
+            def fetch_usage(profile: dict[str, object]) -> dict[str, object]:
+                alias = str(profile.get("accountId") or "").removeprefix("acct-")
+                fetch_calls.append(alias)
+                return {
+                    "plan": "plus",
+                    "windows": [
+                        {
+                            "label": "5h",
+                            "usedPercent": 40.0,
+                            "resetAt": now_ms + 3600 * 1000,
+                        },
+                        {
+                            "label": "7d",
+                            "usedPercent": 35.0,
+                            "resetAt": now_ms + 2 * 86400 * 1000,
+                        },
+                    ],
+                }
+
+            MODULE.build_dashboard_rows(
+                root=root,
+                fetch_usage_fn=fetch_usage,
+                fetch_catalog_fn=lambda profile: [],
+                previous_rows=previous_rows,
+                force_full_refresh=True,
+            )
+
+            self.assertEqual(fetch_calls, ["current", "due", "cached"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,14 @@ def make_profile() -> dict[str, object]:
 
 
 class DashboardAuthToleranceTests(unittest.TestCase):
+    def test_build_panel_header_line_includes_version(self) -> None:
+        header = MODULE.build_panel_header_line()
+
+        self.assertIn(MODULE.APP_RELEASE_VERSION, header)
+
+    def test_default_console_height_increased(self) -> None:
+        self.assertEqual(MODULE.DEFAULT_WINDOW_LINES, 33)
+
     def test_refresh_endpoint_401_immediately_blocks_account(self) -> None:
         previous_row = make_previous_row()
         profile = make_profile()
@@ -280,6 +288,56 @@ class DashboardAuthToleranceTests(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision["pickedAlias"], "gamma")
+
+    def test_render_dashboard_text_shows_neutral_401_after_last_sync_and_keeps_data(
+        self,
+    ) -> None:
+        row = {
+            **make_previous_row(),
+            "warning": "鉴权接口临时波动，已沿用上次额度数据，本次先不判定账号失效",
+            "_authIssueStatus": 401,
+            "_lastRefreshedAtMs": MODULE.current_time_ms(),
+        }
+
+        text = MODULE.render_dashboard_text([row], "alpha")
+
+        self.assertIn("上次同步", text)
+        self.assertIn("401 可能网络/鉴权", text)
+        self.assertIn("5h", text)
+        self.assertNotIn("沿用上次数据", text)
+
+    def test_render_dashboard_text_shows_neutral_403_after_last_sync_and_keeps_data(
+        self,
+    ) -> None:
+        row = {
+            **make_previous_row(),
+            "warning": "鉴权接口临时波动，已沿用上次额度数据，本次先不判定工作组异常",
+            "_authIssueStatus": 403,
+            "_lastRefreshedAtMs": MODULE.current_time_ms(),
+        }
+
+        text = MODULE.render_dashboard_text([row], "alpha")
+
+        self.assertIn("上次同步", text)
+        self.assertIn("403 可能网络/工作组", text)
+        self.assertIn("5h", text)
+        self.assertNotIn("沿用上次数据", text)
+
+    def test_render_dashboard_text_shows_short_network_issue_after_last_sync(
+        self,
+    ) -> None:
+        row = {
+            **make_previous_row(),
+            "warning": "网络连接失败，可能未开启 VPN/代理或当前节点不稳定；已保留上次数据",
+            "_lastRefreshedAtMs": MODULE.current_time_ms(),
+        }
+
+        text = MODULE.render_dashboard_text([row], "alpha")
+
+        self.assertIn("上次同步", text)
+        self.assertIn("网络波动", text)
+        self.assertIn("5h", text)
+        self.assertNotIn("可能未开启", text)
 
 
 if __name__ == "__main__":

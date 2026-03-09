@@ -65,6 +65,7 @@ SCRIPT_DIR = (
     if getattr(sys, "frozen", False)
     else Path(__file__).resolve().parent
 )
+VERSION_FILE = SCRIPT_DIR.parent / "version.txt"
 LOGIN_HELPER = SCRIPT_DIR / "openai_codex_login_helper.mjs"
 BUNDLED_RUNTIME_DIR = SCRIPT_DIR / "runtime"
 BUNDLED_NODE_EXE = (
@@ -79,12 +80,25 @@ BUNDLED_OPENCODE_EXE = BUNDLED_RUNTIME_DIR / (
 )
 console = Console()
 APP_NAME = "OpenAI Hub"
+
+
+def load_app_release_version() -> str:
+    try:
+        value = VERSION_FILE.read_text(encoding="utf-8-sig").strip()
+        if value:
+            return value
+    except OSError:
+        pass
+    return "dev"
+
+
+APP_RELEASE_VERSION = load_app_release_version()
 APP_VARIANT = os.environ.get("GT_VARIANT", "full").strip().lower() or "full"
 HOME_PANEL_TITLE = "账号中心"
 PANEL_CONTENT_WIDTH = 72
 PANEL_WIDTH = PANEL_CONTENT_WIDTH + 4
 DEFAULT_WINDOW_COLS = 80
-DEFAULT_WINDOW_LINES = 30
+DEFAULT_WINDOW_LINES = 33
 TARGET_OPENCLAW_MODEL_ID = "gpt-5.4-codex"
 TARGET_OPENCLAW_MODEL_NAME = "GPT-5.4 Codex"
 TARGET_OPENCLAW_MODEL_ALIAS = "gpt54"
@@ -406,15 +420,11 @@ def render_dashboard_text(
         colored_name = (
             f"[{status['style']}][bold]{display_name}[/bold][/{status['style']}]"
         )
+        last_synced_at = format_dashboard_last_synced_at(row.get("_lastRefreshedAtMs"))
+        sync_issue_suffix = format_dashboard_sync_issue_suffix(row)
         lines.append(
-            f"{marker} {colored_name} [dim]·[/dim] [dim]账号ID[/dim] {account_id}"
+            f"{marker} {colored_name} [dim]·[/dim] [dim]账号ID[/dim] {account_id} [dim]·[/dim] [dim]上次同步[/dim] {last_synced_at}{sync_issue_suffix}"
         )
-        issue = describe_dashboard_issue(row)
-        if issue is not None:
-            lines.append(
-                f"  [bold {issue['style']}]{issue['label']}[/bold {issue['style']}] [dim]·[/dim] [{issue['style']}]{issue['detail']}[/{issue['style']}]"
-            )
-            continue
         windows = row.get("windows") or []
         if not windows:
             lines.append("  [dim]暂无额度数据[/dim]")
@@ -428,6 +438,45 @@ def render_dashboard_text(
                 f"  [bold]{window.get('label', '?')}[/bold] {bar} [dim]已用[/dim] {used:.1f}% [dim]·[/dim] [{quota_style}]剩余 {remaining:.1f}%[/{quota_style}] [dim]·[/dim] [dim]{format_reset_at(window.get('resetAt'))}[/dim]"
             )
     return "\n".join(lines)
+
+
+def format_dashboard_last_synced_at(last_refreshed_at_ms: Any) -> str:
+    if not isinstance(last_refreshed_at_ms, int) or last_refreshed_at_ms <= 0:
+        return "未同步"
+    synced_at = datetime.fromtimestamp(int(last_refreshed_at_ms) / 1000)
+    now = datetime.now()
+    if synced_at.date() == now.date():
+        return synced_at.strftime("今天 %H:%M")
+    return synced_at.strftime("%m-%d %H:%M")
+
+
+def format_dashboard_sync_issue_suffix(row: JsonDict) -> str:
+    issue = describe_dashboard_issue(row)
+    if issue is None:
+        return ""
+    style = str(issue.get("style") or "yellow")
+    status_code = int(row.get("_authIssueStatus") or 0)
+    if status_code == 401:
+        return " [dim]·[/dim] [yellow]401 可能网络/鉴权[/yellow]"
+    if status_code == 403:
+        return " [dim]·[/dim] [yellow]403 可能网络/工作组[/yellow]"
+    issue_key = str(issue.get("key") or "")
+    if issue_key == "expired":
+        return " [dim]·[/dim] [red]401 可能网络/鉴权[/red]"
+    if issue_key == "workspace":
+        return " [dim]·[/dim] [red]403 可能网络/工作组[/red]"
+    detail = str(issue.get("detail") or "")
+    if "请求超时" in detail or "连接超时" in detail:
+        return f" [dim]·[/dim] [{style}]请求超时[/{style}]"
+    if "网络连接失败" in detail or "VPN" in detail or "代理" in detail:
+        return f" [dim]·[/dim] [{style}]网络波动[/{style}]"
+    if "暂停自动检测" in detail:
+        return " [dim]·[/dim] [yellow]需重登[/yellow]"
+    if issue_key == "warning":
+        return f" [dim]·[/dim] [{style}]同步异常[/{style}]"
+    if issue_key == "error":
+        return f" [dim]·[/dim] [{style}]状态异常[/{style}]"
+    return f" [dim]·[/dim] [{style}]{escape_panel_text(str(issue.get('label') or '异常'))}[/{style}]"
 
 
 def get_window_remaining_map(windows: list[JsonDict]) -> dict[str, float]:
@@ -1041,8 +1090,10 @@ def build_dashboard_panel_footer_status(state: DashboardState) -> str | None:
 def build_panel_header_line(
     status_markup: str | None = None, width_hint: int = 72
 ) -> str:
-    title = APP_NAME
-    title_markup = f"[bold cyan]{APP_NAME}[/bold cyan]"
+    title = f"{APP_NAME} v{APP_RELEASE_VERSION}"
+    title_markup = (
+        f"[bold cyan]{APP_NAME}[/bold cyan] [dim]v{APP_RELEASE_VERSION}[/dim]"
+    )
     title_width = get_terminal_display_width(title)
     title_start = max(0, (width_hint - title_width) // 2)
     if not status_markup:
@@ -3398,6 +3449,7 @@ def build_dashboard_rows(
     progress_fn: Callable[[str, int, int], None] | None = None,
     previous_rows: list[JsonDict] | None = None,
     max_workers: int = MAX_DASHBOARD_FETCH_WORKERS,
+    force_full_refresh: bool = False,
 ) -> list[JsonDict]:
     store = load_store(root)
     accounts = store.get("accounts", {})
@@ -3460,7 +3512,11 @@ def build_dashboard_rows(
         return cached_row
 
     scheduled_aliases: set[str] = set()
-    if total_accounts <= 1 or not previous_rows_by_alias:
+    if force_full_refresh:
+        scheduled_aliases = {
+            alias for alias, _raw_profile in account_items if isinstance(alias, str)
+        }
+    elif total_accounts <= 1 or not previous_rows_by_alias:
         scheduled_aliases = {
             alias for alias, _raw_profile in account_items if isinstance(alias, str)
         }
@@ -4576,6 +4632,14 @@ def cmd_menu() -> int:
                     build_home_text,
                     options,
                     selected_index,
+                    build_rows_fn=lambda root,
+                    progress_fn=None,
+                    previous_rows=None: build_dashboard_rows(
+                        root,
+                        progress_fn=progress_fn,
+                        previous_rows=previous_rows,
+                        force_full_refresh=True,
+                    ),
                 )
                 continue
             if action == "exit":
