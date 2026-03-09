@@ -67,7 +67,14 @@ SCRIPT_DIR = (
 )
 VERSION_FILE = SCRIPT_DIR.parent / "version.txt"
 LOGIN_HELPER = SCRIPT_DIR / "openai_codex_login_helper.mjs"
-BUNDLED_RUNTIME_DIR = SCRIPT_DIR / "runtime"
+BUNDLED_RUNTIME_DIR_CANDIDATES = [
+    SCRIPT_DIR / "bundled_runtime",
+    SCRIPT_DIR / "runtime",
+]
+BUNDLED_RUNTIME_DIR = next(
+    (path for path in BUNDLED_RUNTIME_DIR_CANDIDATES if path.exists()),
+    BUNDLED_RUNTIME_DIR_CANDIDATES[0],
+)
 BUNDLED_NODE_EXE = (
     BUNDLED_RUNTIME_DIR / "node" / ("node.exe" if os.name == "nt" else "node")
 )
@@ -164,6 +171,10 @@ def variant_requires_openclaw_login() -> bool:
 
 def variant_requires_opencode_config() -> bool:
     return APP_VARIANT in {"full", "opencode"}
+
+
+def variant_requires_local_openclaw_install() -> bool:
+    return APP_VARIANT in {"full", "openclaw"}
 
 
 stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -1993,6 +2004,14 @@ def ensure_default_agent_dirs(root: Path = ROOT) -> list[Path]:
 
 def build_init_failure_detail(reason: str, target_path: Path | None = None) -> str:
     path_text = f"\n检测路径：{target_path}" if target_path is not None else ""
+    if reason == "openclaw-program-missing":
+        return "未检测到本机已安装的 OpenClAW 程序。\n建议先正常安装 OpenClAW，并确认 `openclaw` 命令可在终端里直接运行后，再重新检测。"
+    if reason == "openclaw-provider-unavailable":
+        return "已检测到 OpenClAW 程序，但无法确认 openai-codex 登录能力可用。\n请先确认 OpenClAW 安装完整、插件可正常加载，再重新检测。"
+    if reason == "openclaw-switch-target-unavailable":
+        return f"OpenClAW 切换目标文件当前不可用，程序无法确认后续切号能成功写入。{path_text}\n请检查该目录/文件是否可读、可写、未被占用，并确认防病毒或同步盘没有锁住这些文件。"
+    if reason == "openclaw-root-missing":
+        return f"找不到 OpenClAW 根目录。{path_text}\n建议目录：{ROOT}\n请先确认 OpenClAW 已安装，并且相关目录已经出现在上面的路径后，再重新检测。"
     if reason == "openclaw-config-missing":
         return f"找不到 OpenClAW 配置文件。{path_text}\n建议目录：{root_openclaw_config_file(ROOT)}\n请先确认 OpenClAW 已安装或目录已准备好，然后重新启动程序。"
     if reason == "openclaw-model-missing":
@@ -2003,13 +2022,180 @@ def build_init_failure_detail(reason: str, target_path: Path | None = None) -> s
         return f"OpenClAW agent 模型文件里缺少 {TARGET_OPENCLAW_MODEL_ID}。{path_text}\n请重新运行初始化；如果仍失败，检查该文件写入权限。"
     if reason == "opencode-config-missing":
         return f"找不到 OpenCode 配置文件。{path_text}\n建议目录：{OPENCODE_CONFIG_FILE}\n请先确认 OpenCode 已安装或目录已准备好，然后重新启动程序。"
+    if reason == "opencode-program-missing":
+        return "未检测到本机已安装的 OpenCode 程序。\n建议先正常安装 OpenCode，并确认 `opencode` 命令可在终端里直接运行后，再重新检测。"
+    if reason == "opencode-switch-target-unavailable":
+        return f"OpenCode 切换目标文件当前不可用，程序无法确认后续切号能成功写入。{path_text}\n请检查该目录/文件是否可读、可写、未被占用，并确认防病毒或同步盘没有锁住这些文件。"
+    if reason == "opencode-config-dir-missing":
+        return f"找不到 OpenCode 配置目录。{path_text}\n建议目录：{OPENCODE_CONFIG_ROOT}\n请先确认 OpenCode 已安装，并且该目录已经生成后，再重新检测。"
     if reason == "opencode-model-missing":
         return f"OpenCode 配置里缺少 {TARGET_OPENCODE_MODEL_KEY}。{path_text}\n请重新运行初始化；如果仍失败，检查配置文件是否只读。"
     if reason == "opencode-auth-missing":
         return f"找不到 OpenCode 凭据文件。{path_text}\n建议目录：{OPENCODE_AUTH_FILE}\n请确认 OpenCode 状态目录存在，然后重新启动程序。"
+    if reason == "opencode-state-dir-missing":
+        return f"找不到 OpenCode 状态目录。{path_text}\n建议目录：{OPENCODE_STATE_ROOT}\n请先启动一次 OpenCode 或确认状态目录已存在，然后重新检测。"
     if reason == "init-marker-missing":
         return f"环境文件存在，但初始化标记未写入。{path_text}\n程序会自动重新初始化；如果反复出现，请检查配置文件写入权限。"
     return f"初始化验证失败。{path_text}\n请检查 OpenClAW / OpenCode 目录是否可写，然后重新启动程序。"
+
+
+def build_init_failure(reason: str, target_path: Path | None = None) -> JsonDict:
+    return {
+        "ok": False,
+        "reason": reason,
+        "detail": build_init_failure_detail(reason, target_path),
+    }
+
+
+def detect_init_hard_failure(
+    root: Path,
+    openclaw_config_path: Path,
+    opencode_config_path: Path,
+    opencode_auth_path: Path,
+    openclaw_program_probe_fn: Callable[[], bool],
+    opencode_program_probe_fn: Callable[[], bool],
+    openclaw_provider_probe_fn: Callable[[str], bool],
+) -> JsonDict | None:
+    if variant_requires_local_openclaw_install():
+        if not openclaw_program_probe_fn():
+            return build_init_failure("openclaw-program-missing")
+        if not root.exists() or not root.is_dir():
+            return build_init_failure("openclaw-root-missing", root)
+        agents_root = root_agents_dir(root)
+        if not agents_root.exists() or not agents_root.is_dir():
+            return build_init_failure("openclaw-agents-missing", agents_root)
+    if variant_requires_opencode_config():
+        if not opencode_program_probe_fn():
+            return build_init_failure("opencode-program-missing")
+        config_dir = opencode_config_path.parent
+        if not config_dir.exists() or not config_dir.is_dir():
+            return build_init_failure("opencode-config-dir-missing", config_dir)
+        state_dir = opencode_auth_path.parent
+        if not state_dir.exists() or not state_dir.is_dir():
+            return build_init_failure("opencode-state-dir-missing", state_dir)
+    if variant_requires_local_openclaw_install():
+        if not openclaw_provider_probe_fn(PROVIDER_KEY):
+            return build_init_failure("openclaw-provider-unavailable")
+    return None
+
+
+def describe_switch_target_scope() -> str:
+    if variant_is_openclaw() and variant_is_opencode():
+        return "OpenClAW + OpenCode"
+    if variant_is_opencode():
+        return "OpenCode"
+    return "OpenClAW"
+
+
+def build_init_success_detail(login_mode_label: str) -> str:
+    return (
+        "本地初始化已完成并验证通过\n"
+        f"当前登录方式：{login_mode_label}\n"
+        f"当前切号目标：{describe_switch_target_scope()}\n"
+        "未验证 OpenAI 账号地区/网络资格；首次真实登录时仍可能被远端策略拒绝"
+    )
+
+
+def read_json_object_strict(path: Path) -> JsonDict:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("文件内容不是 JSON 对象")
+    return data
+
+
+def probe_json_target_writable(path: Path) -> None:
+    original_data = read_json_object_strict(path)
+    with path.open("r+", encoding="utf-8"):
+        pass
+    probe_path = path.parent / f".openaihub-probe-{path.stem}.json"
+    backup_path = probe_path.with_name(f"{probe_path.name}.bak")
+    try:
+        write_json(probe_path, {"probe": "openaihub", "target": path.name})
+        probe_payload = read_json_object_strict(probe_path)
+        if probe_payload.get("probe") != "openaihub":
+            raise ValueError("探针文件回读不一致")
+        shutil.copy2(probe_path, backup_path)
+    finally:
+        if backup_path.exists():
+            backup_path.unlink()
+        if probe_path.exists():
+            probe_path.unlink()
+    if read_json_object_strict(path) != original_data:
+        raise ValueError("目标文件回读结果与原始内容不一致")
+
+
+def probe_switch_targets(
+    root: Path = ROOT,
+    opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+) -> JsonDict | None:
+    if variant_is_openclaw():
+        for adir in agent_dirs(root):
+            for target_path in [adir / "auth.json", adir / "auth-profiles.json"]:
+                try:
+                    probe_json_target_writable(target_path)
+                except Exception:
+                    return build_init_failure(
+                        "openclaw-switch-target-unavailable", target_path
+                    )
+    if variant_is_opencode():
+        try:
+            probe_json_target_writable(opencode_auth_path)
+        except Exception:
+            return build_init_failure(
+                "opencode-switch-target-unavailable", opencode_auth_path
+            )
+    return None
+
+
+def extract_http_error_payload(error: requests.HTTPError) -> JsonDict:
+    response = getattr(error, "response", None)
+    if response is None:
+        return {}
+    try:
+        payload = response.json()
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def is_region_restricted_error_code(code: str | None) -> bool:
+    normalized = str(code or "").strip().lower()
+    return "unsupported_country_region_territory" in normalized
+
+
+def build_region_restricted_login_message() -> str:
+    return (
+        "当前网络出口或地区不受 OpenAI 支持，授权码已拿到，但在换取登录凭据时被远端拒绝。\n"
+        "这不是本地初始化或 OpenClAW 缺失导致的问题。\n"
+        "请更换到受支持地区的稳定网络/代理后，再重新登录。"
+    )
+
+
+def translate_login_error(error: Exception) -> Exception:
+    if isinstance(error, ValueError):
+        return error
+    if isinstance(error, requests.HTTPError):
+        payload = extract_http_error_payload(error)
+        error_payload = payload.get("error") if isinstance(payload, dict) else {}
+        error_code = (
+            str((error_payload or {}).get("code") or "")
+            if isinstance(error_payload, dict)
+            else ""
+        )
+        if is_region_restricted_error_code(error_code):
+            return ValueError(build_region_restricted_login_message())
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr_text = str(getattr(error, "stderr", "") or "")
+        stdout_text = str(getattr(error, "output", "") or "")
+        combined = f"{stdout_text}\n{stderr_text}".lower()
+        if is_region_restricted_error_code(combined):
+            return ValueError(build_region_restricted_login_message())
+    return error
+
+
+def should_fallback_after_helper_error(error: Exception) -> bool:
+    return not isinstance(translate_login_error(error), ValueError)
 
 
 def verify_initialized_environment(
@@ -2018,31 +2204,36 @@ def verify_initialized_environment(
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
     require_marker: bool = True,
+    openclaw_program_probe_fn: Callable[[], bool] | None = None,
+    opencode_program_probe_fn: Callable[[], bool] | None = None,
+    openclaw_provider_probe_fn: Callable[[str], bool] | None = None,
+    switch_target_probe_fn: Callable[[Path, Path], JsonDict | None] | None = None,
 ) -> JsonDict:
     resolved_openclaw_config_path = openclaw_config_path or root_openclaw_config_file(
         root
     )
+    hard_failure = detect_init_hard_failure(
+        root,
+        resolved_openclaw_config_path,
+        opencode_config_path,
+        opencode_auth_path,
+        openclaw_program_probe_fn or is_openclaw_program_installed,
+        opencode_program_probe_fn or is_opencode_program_installed,
+        openclaw_provider_probe_fn or official_provider_available_local,
+    )
+    if hard_failure is not None:
+        return hard_failure
     model_files: list[Path] = []
-    if variant_requires_openclaw_login():
+    if variant_requires_local_openclaw_install():
         openclaw_config = read_json(resolved_openclaw_config_path)
         if not resolved_openclaw_config_path.exists():
-            return {
-                "ok": False,
-                "reason": "openclaw-config-missing",
-                "detail": build_init_failure_detail(
-                    "openclaw-config-missing", resolved_openclaw_config_path
-                ),
-            }
+            return build_init_failure(
+                "openclaw-config-missing", resolved_openclaw_config_path
+            )
 
         model_files = detect_openclaw_agent_model_files(root)
         if not model_files:
-            return {
-                "ok": False,
-                "reason": "openclaw-agents-missing",
-                "detail": build_init_failure_detail(
-                    "openclaw-agents-missing", root_agents_dir(root)
-                ),
-            }
+            return build_init_failure("openclaw-agents-missing", root_agents_dir(root))
 
         provider_models = (
             openclaw_config.get("models", {})
@@ -2055,13 +2246,9 @@ def verify_initialized_environment(
             for item in provider_models
             if isinstance(item, dict)
         ):
-            return {
-                "ok": False,
-                "reason": "openclaw-model-missing",
-                "detail": build_init_failure_detail(
-                    "openclaw-model-missing", resolved_openclaw_config_path
-                ),
-            }
+            return build_init_failure(
+                "openclaw-model-missing", resolved_openclaw_config_path
+            )
 
         for models_path in model_files:
             model_config = read_json(models_path)
@@ -2075,44 +2262,26 @@ def verify_initialized_environment(
                 for item in agent_models
                 if isinstance(item, dict)
             ):
-                return {
-                    "ok": False,
-                    "reason": "openclaw-agent-model-missing",
-                    "detail": build_init_failure_detail(
-                        "openclaw-agent-model-missing", models_path
-                    ),
-                }
+                return build_init_failure("openclaw-agent-model-missing", models_path)
 
     if variant_requires_opencode_config():
         opencode_config = read_json(opencode_config_path)
         if not opencode_config_path.exists():
-            return {
-                "ok": False,
-                "reason": "opencode-config-missing",
-                "detail": build_init_failure_detail(
-                    "opencode-config-missing", opencode_config_path
-                ),
-            }
+            return build_init_failure("opencode-config-missing", opencode_config_path)
         opencode_models = (
             opencode_config.get("provider", {}).get("openai", {}).get("models", {})
         )
         if not isinstance(opencode_models.get(TARGET_OPENCODE_MODEL_KEY), dict):
-            return {
-                "ok": False,
-                "reason": "opencode-model-missing",
-                "detail": build_init_failure_detail(
-                    "opencode-model-missing", opencode_config_path
-                ),
-            }
+            return build_init_failure("opencode-model-missing", opencode_config_path)
 
         if not opencode_auth_path.exists():
-            return {
-                "ok": False,
-                "reason": "opencode-auth-missing",
-                "detail": build_init_failure_detail(
-                    "opencode-auth-missing", opencode_auth_path
-                ),
-            }
+            return build_init_failure("opencode-auth-missing", opencode_auth_path)
+
+    switch_target_failure = (switch_target_probe_fn or probe_switch_targets)(
+        root, opencode_auth_path
+    )
+    if switch_target_failure is not None:
+        return switch_target_failure
 
     app_state = load_app_state(root)
     if require_marker and not (
@@ -2120,22 +2289,21 @@ def verify_initialized_environment(
         and app_state.get("initVerified")
         and app_state.get("initVersion") == INIT_VERSION
     ):
-        return {
-            "ok": False,
-            "reason": "init-marker-missing",
-            "detail": build_init_failure_detail(
-                "init-marker-missing", resolved_openclaw_config_path
-            ),
-        }
+        return build_init_failure("init-marker-missing", resolved_openclaw_config_path)
+
+    login_mode, login_mode_label = describe_login_method()
 
     return {
         "ok": True,
         "reason": None,
-        "detail": "初始化已完成并验证通过",
+        "detail": build_init_success_detail(login_mode_label),
         "openclaw_config_path": resolved_openclaw_config_path,
         "opencode_config_path": opencode_config_path,
         "opencode_auth_path": opencode_auth_path,
         "agent_model_files": model_files,
+        "loginHelperAvailable": login_mode == "helper",
+        "loginMode": login_mode,
+        "loginModeLabel": login_mode_label,
     }
 
 
@@ -2279,17 +2447,39 @@ def initialize_environment(
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
     progress_callback: Callable[[str], None] | None = None,
+    openclaw_program_probe_fn: Callable[[], bool] | None = None,
+    opencode_program_probe_fn: Callable[[], bool] | None = None,
+    openclaw_provider_probe_fn: Callable[[str], bool] | None = None,
+    switch_target_probe_fn: Callable[[Path, Path], JsonDict | None] | None = None,
 ) -> JsonDict:
-    root.mkdir(parents=True, exist_ok=True)
     resolved_openclaw_config_path = openclaw_config_path or root_openclaw_config_file(
         root
     )
+    hard_failure = detect_init_hard_failure(
+        root,
+        resolved_openclaw_config_path,
+        opencode_config_path,
+        opencode_auth_path,
+        openclaw_program_probe_fn or is_openclaw_program_installed,
+        opencode_program_probe_fn or is_opencode_program_installed,
+        openclaw_provider_probe_fn or official_provider_available_local,
+    )
+    if hard_failure is not None:
+        return {
+            "root": root,
+            "openclaw_config_path": resolved_openclaw_config_path,
+            "opencode_config_path": opencode_config_path,
+            "opencode_auth_path": opencode_auth_path,
+            "agent_model_files": [],
+            "agent_count": 0,
+            "verification": hard_failure,
+        }
     agent_model_files: list[Path] = []
     if variant_requires_openclaw_login():
         if progress_callback is not None:
             progress_callback("步骤 1/5 检查 OpenClAW 目录")
         ensure_store_file(root)
-        ensure_default_agent_dirs(root)
+    if variant_requires_local_openclaw_install():
         if progress_callback is not None:
             progress_callback("步骤 2/5 检查 OpenClAW 配置")
         resolved_openclaw_config_path = ensure_openclaw_config(
@@ -2317,6 +2507,10 @@ def initialize_environment(
         opencode_config_path=resolved_opencode_config_path,
         opencode_auth_path=resolved_opencode_auth_path,
         require_marker=False,
+        openclaw_program_probe_fn=openclaw_program_probe_fn,
+        opencode_program_probe_fn=opencode_program_probe_fn,
+        openclaw_provider_probe_fn=openclaw_provider_probe_fn,
+        switch_target_probe_fn=switch_target_probe_fn,
     )
     set_init_status(root, completed=True, verified=bool(verification.get("ok")))
     verification = verify_initialized_environment(
@@ -2324,6 +2518,10 @@ def initialize_environment(
         openclaw_config_path=resolved_openclaw_config_path,
         opencode_config_path=resolved_opencode_config_path,
         opencode_auth_path=resolved_opencode_auth_path,
+        openclaw_program_probe_fn=openclaw_program_probe_fn,
+        opencode_program_probe_fn=opencode_program_probe_fn,
+        openclaw_provider_probe_fn=openclaw_provider_probe_fn,
+        switch_target_probe_fn=switch_target_probe_fn,
     )
     return {
         "root": root,
@@ -2557,7 +2755,10 @@ def complete_login_session(
         },
         timeout=timeout,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise translate_login_error(exc) from exc
     payload = response.json()
     access = str(payload.get("access_token", "") or "")
     refresh = str(payload.get("refresh_token", "") or "")
@@ -2683,24 +2884,104 @@ def build_login_helper_env(output_path: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["OPENCODE_LOGIN_OUTPUT_PATH"] = str(output_path)
     env["OPENCODE_LOGIN_INTERACTIVE"] = "1"
-    if BUNDLED_OPENAI_CODEX_HELPER_ENTRY.exists():
-        env["OPENCLAW_LOGIN_MODULE_ENTRY"] = str(BUNDLED_OPENAI_CODEX_HELPER_ENTRY)
+    login_module_entry = resolve_login_module_entry()
+    if login_module_entry is not None:
+        env["OPENCLAW_LOGIN_MODULE_ENTRY"] = str(login_module_entry)
     return env
 
 
 def resolve_node_command() -> str:
-    if BUNDLED_NODE_EXE.exists():
-        return str(BUNDLED_NODE_EXE)
+    bundled_node = resolve_bundled_node_exe()
+    if bundled_node is not None:
+        return str(bundled_node)
     found = shutil.which("node")
     if found:
         return found
     return "node"
 
 
+def iter_runtime_dir_candidates() -> Iterator[Path]:
+    seen: set[str] = set()
+    for candidate in [BUNDLED_RUNTIME_DIR, *BUNDLED_RUNTIME_DIR_CANDIDATES]:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield candidate
+
+
+def resolve_bundled_node_exe() -> Path | None:
+    for runtime_dir in iter_runtime_dir_candidates():
+        candidate = runtime_dir / "node" / ("node.exe" if os.name == "nt" else "node")
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def resolve_bundled_openclaw_entry() -> Path | None:
+    for runtime_dir in iter_runtime_dir_candidates():
+        candidate = runtime_dir / "node_modules" / "openclaw" / "openclaw.mjs"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def build_pi_ai_oauth_entry(base_dir: Path) -> Path:
+    return (
+        base_dir
+        / "node_modules"
+        / "openclaw"
+        / "node_modules"
+        / "@mariozechner"
+        / "pi-ai"
+        / "dist"
+        / "utils"
+        / "oauth"
+        / "openai-codex.js"
+    )
+
+
+def resolve_login_module_entry(
+    appdata: str | None = None,
+    configured_entry: str | None = None,
+) -> Path | None:
+    candidates: list[Path] = []
+    configured_path = (
+        configured_entry
+        if configured_entry is not None
+        else os.environ.get("OPENCLAW_LOGIN_MODULE_ENTRY", "")
+    )
+    if str(configured_path or "").strip():
+        candidates.append(Path(str(configured_path).strip()))
+    for runtime_dir in iter_runtime_dir_candidates():
+        candidates.append(runtime_dir / "oauth" / "openai-codex.js")
+        candidates.append(build_pi_ai_oauth_entry(runtime_dir))
+    resolved_appdata = appdata if appdata is not None else os.environ.get("APPDATA", "")
+    if resolved_appdata:
+        candidates.append(build_pi_ai_oauth_entry(Path(resolved_appdata) / "npm"))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def describe_login_method(helper_path: Path = LOGIN_HELPER) -> tuple[str, str]:
+    if not helper_path.exists():
+        return ("manual-callback", "手动回调（缺少自动登录助手脚本）")
+    login_module_entry = resolve_login_module_entry()
+    if login_module_entry is None:
+        return ("manual-callback", "手动回调（缺少自动登录模块）")
+    if resolve_bundled_node_exe() is not None or shutil.which("node") is not None:
+        return ("helper", "自动登录助手")
+    return ("manual-callback", "手动回调（当前环境缺少 Node 运行时）")
+
+
 def login_helper_available(helper_path: Path = LOGIN_HELPER) -> bool:
     if not helper_path.exists():
         return False
-    if BUNDLED_NODE_EXE.exists():
+    if resolve_login_module_entry() is None:
+        return False
+    if resolve_bundled_node_exe() is not None:
         return True
     return shutil.which("node") is not None
 
@@ -2723,10 +3004,21 @@ def build_official_login_command(executable: str = "openclaw") -> list[str]:
     return [executable, "models", "auth", "login", "--provider", "openai-codex"]
 
 
+def is_openclaw_program_installed(executable: str = "openclaw") -> bool:
+    return shutil.which(executable) is not None
+
+
+def is_opencode_program_installed(executable: str = "opencode") -> bool:
+    return shutil.which(executable) is not None
+
+
 def resolve_official_login_command(appdata: str | None = None) -> list[str]:
-    if BUNDLED_OPENCLAW_ENTRY.exists():
+    if is_openclaw_program_installed():
+        return build_official_login_command()
+    bundled_openclaw_entry = resolve_bundled_openclaw_entry()
+    if bundled_openclaw_entry is not None:
         return build_openclaw_command_with_entrypoint(
-            resolve_node_command(), BUNDLED_OPENCLAW_ENTRY
+            resolve_node_command(), bundled_openclaw_entry
         )
     resolved_appdata = appdata if appdata is not None else os.environ.get("APPDATA", "")
     if resolved_appdata:
@@ -2780,14 +3072,56 @@ def official_provider_available(provider_id: str = PROVIDER_KEY) -> bool:
     try:
         ensure_openclaw_config(ROOT)
         command = ["openclaw", "plugins", "list", "--json"]
-        if BUNDLED_OPENCLAW_ENTRY.exists():
+        bundled_openclaw_entry = resolve_bundled_openclaw_entry()
+        if bundled_openclaw_entry is not None:
             command = [
                 resolve_node_command(),
-                str(BUNDLED_OPENCLAW_ENTRY),
+                str(bundled_openclaw_entry),
                 "plugins",
                 "list",
                 "--json",
             ]
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    payload_text = extract_json_object(result.stdout or "")
+    if not payload_text:
+        return False
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return False
+    plugins = payload.get("plugins")
+    if not isinstance(plugins, list):
+        return False
+    for plugin in plugins:
+        if not isinstance(plugin, dict):
+            continue
+        provider_ids = plugin.get("providerIds")
+        if isinstance(provider_ids, list) and provider_id in provider_ids:
+            return (
+                bool(plugin.get("enabled", False))
+                and str(plugin.get("status", "")) == "loaded"
+            )
+    return False
+
+
+def official_provider_available_local(
+    provider_id: str = PROVIDER_KEY, executable: str = "openclaw"
+) -> bool:
+    if not is_openclaw_program_installed(executable):
+        return False
+    try:
+        command = [executable, "plugins", "list", "--json"]
         result = subprocess.run(
             command,
             check=False,
@@ -4113,6 +4447,9 @@ def cmd_add(
             print("- 浏览器登录完成后，回贴回调地址即可保存账号")
             return 0
         except (FileNotFoundError, OSError, subprocess.CalledProcessError) as exc:
+            translated_error = translate_login_error(exc)
+            if isinstance(translated_error, ValueError):
+                raise translated_error from exc
             print(f"- 自动登录助手暂时不可用，已切换为手动回调登录：{exc}")
 
     saved_alias = add_account_via_manual_callback_fallback(
@@ -4147,12 +4484,24 @@ def cmd_init(
         opencode_config_path=opencode_config_path,
         opencode_auth_path=opencode_auth_path,
     )
+    verification = summary.get("verification") if isinstance(summary, dict) else None
+    if not isinstance(verification, dict) or not verification.get("ok"):
+        detail = None
+        if isinstance(verification, dict):
+            detail = str(verification.get("detail") or "").strip() or None
+        print("初始化失败")
+        if detail:
+            print(detail)
+        return 1
     print("初始化完成")
     if variant_requires_openclaw_login():
-        print(f"- OpenClAW 根目录：{summary['root']}")
-        print(f"- OpenClAW 配置：{summary['openclaw_config_path']}")
-        print(f"- 已检查 agent 模型文件数：{summary['agent_count']}")
-        print(f"- 已确保 OpenClAW 模型：{TARGET_OPENCLAW_MODEL_ID}")
+        print(f"- 当前登录方式：{verification.get('loginModeLabel') or '手动回调'}")
+        print(f"- 当前切号目标：{describe_switch_target_scope()}")
+        if variant_requires_local_openclaw_install():
+            print(f"- OpenClAW 根目录：{summary['root']}")
+            print(f"- OpenClAW 配置：{summary['openclaw_config_path']}")
+            print(f"- 已检查 agent 模型文件数：{summary['agent_count']}")
+            print(f"- 已确保 OpenClAW 模型：{TARGET_OPENCLAW_MODEL_ID}")
     if variant_requires_opencode_config():
         print(f"- OpenCode 配置：{summary['opencode_config_path']}")
         print(f"- OpenCode 凭据路径：{summary['opencode_auth_path']}")
