@@ -9,7 +9,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-APP_RELEASE_VERSION = "1.1.7"
+APP_RELEASE_VERSION = "1.1.8"
 APP_COMMAND_NAME = "openaihub"
 APP_SHORT_COMMAND = "OAH"
 
@@ -97,6 +97,8 @@ def main() -> int:
     env = os.environ.copy()
     env["GT_VARIANT"] = variant
     os.environ.update(env)
+    if hasattr(switcher, "set_app_variant"):
+        switcher.set_app_variant(variant)
     old_argv = list(sys.argv)
     try:
         sys.argv = [old_argv[0], "menu"]

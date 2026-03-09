@@ -133,6 +133,17 @@ MONITOR_FRAMES = (
 )
 
 
+def get_app_variant() -> str:
+    return str(globals().get("APP_VARIANT", "full") or "full").strip().lower() or "full"
+
+
+def set_app_variant(value: str) -> str:
+    normalized = str(value or "").strip().lower() or "full"
+    globals()["APP_VARIANT"] = normalized
+    os.environ["GT_VARIANT"] = normalized
+    return normalized
+
+
 def build_refresh_bar_frames() -> tuple[str, ...]:
     trail = ["#38bdf8", "#60a5fa", "#93c5fd", "#334155", "#1e293b", "#0f172a"]
     track_length = 5
@@ -158,23 +169,23 @@ REFRESH_BAR_FRAMES = build_refresh_bar_frames()
 
 
 def variant_is_openclaw() -> bool:
-    return APP_VARIANT in {"full", "openclaw"}
+    return get_app_variant() in {"full", "openclaw"}
 
 
 def variant_is_opencode() -> bool:
-    return APP_VARIANT in {"full", "opencode"}
+    return get_app_variant() in {"full", "opencode"}
 
 
 def variant_requires_openclaw_login() -> bool:
-    return APP_VARIANT in {"full", "openclaw", "opencode"}
+    return get_app_variant() in {"full", "openclaw", "opencode"}
 
 
 def variant_requires_opencode_config() -> bool:
-    return APP_VARIANT in {"full", "opencode"}
+    return get_app_variant() in {"full", "opencode"}
 
 
 def variant_requires_local_openclaw_install() -> bool:
-    return APP_VARIANT in {"full", "openclaw"}
+    return get_app_variant() in {"full", "openclaw"}
 
 
 stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
