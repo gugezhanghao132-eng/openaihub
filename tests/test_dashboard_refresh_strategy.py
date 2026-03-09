@@ -267,6 +267,75 @@ class DashboardRefreshStrategyTests(unittest.TestCase):
             next_refresh_at_ms - now_ms, MODULE.AUTO_REFRESH_INTERVAL_MS
         )
 
+    def test_daily_pending_row_respects_auth_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            write_store(
+                root,
+                "current",
+                {
+                    "current": make_account("current"),
+                    "blocked": make_account("blocked"),
+                },
+            )
+            now_ms = MODULE.current_time_ms()
+            previous_rows = [
+                make_previous_row(
+                    "current",
+                    is_current=True,
+                    next_refresh_at_ms=now_ms - 1,
+                    remaining_5h=40.0,
+                    remaining_7d=60.0,
+                    reset_5h_ms=now_ms + 60 * 60 * 1000,
+                    reset_7d_ms=now_ms + 2 * 86400 * 1000,
+                ),
+                {
+                    **make_previous_row(
+                        "blocked",
+                        is_current=False,
+                        next_refresh_at_ms=now_ms - 1,
+                        remaining_5h=20.0,
+                        remaining_7d=20.0,
+                        reset_5h_ms=now_ms + 30 * 60 * 1000,
+                        reset_7d_ms=now_ms + 12 * 3600 * 1000,
+                    ),
+                    "_dailyRefreshSuccessDay": "2000-01-01",
+                    "_authBlockedUntilMs": now_ms + 15 * 60 * 1000,
+                    "_authBlockedRefresh": "refresh-blocked",
+                },
+            ]
+            fetch_calls: list[str] = []
+
+            def fetch_usage(profile: dict[str, object]) -> dict[str, object]:
+                alias = str(profile.get("accountId") or "").removeprefix("acct-")
+                fetch_calls.append(alias)
+                return {
+                    "plan": "plus",
+                    "windows": [
+                        {
+                            "label": "5h",
+                            "usedPercent": 40.0,
+                            "resetAt": now_ms + 3600 * 1000,
+                        },
+                        {
+                            "label": "7d",
+                            "usedPercent": 35.0,
+                            "resetAt": now_ms + 2 * 86400 * 1000,
+                        },
+                    ],
+                }
+
+            rows = MODULE.build_dashboard_rows(
+                root=root,
+                fetch_usage_fn=fetch_usage,
+                fetch_catalog_fn=lambda profile: [],
+                previous_rows=previous_rows,
+            )
+
+            self.assertEqual(fetch_calls, ["current"])
+            blocked_row = next(row for row in rows if row["alias"] == "blocked")
+            self.assertGreater(int(blocked_row.get("_authBlockedUntilMs") or 0), now_ms)
+
 
 if __name__ == "__main__":
     unittest.main()
