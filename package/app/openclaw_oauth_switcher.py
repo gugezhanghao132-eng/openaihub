@@ -3474,6 +3474,15 @@ def build_dashboard_rows(
             if not isinstance(previous, dict) or not previous:
                 scheduled_aliases.add(alias)
                 continue
+            blocked_until_ms = int(previous.get("_authBlockedUntilMs") or 0)
+            blocked_refresh = str(previous.get("_authBlockedRefresh") or "")
+            current_refresh = str(raw_profile.get("refresh") or "")
+            if (
+                blocked_until_ms > now_ms
+                and blocked_refresh
+                and blocked_refresh == current_refresh
+            ):
+                continue
             if str(previous.get("_dailyRefreshSuccessDay") or "") != today_key:
                 due_background.append(
                     (
@@ -3559,13 +3568,7 @@ def build_dashboard_rows(
                     fetch_catalog_fn,
                     previous=previous_rows_by_alias.get(alias),
                     on_profile_refreshed=record_refreshed_profile,
-                    ignore_auth_block=str(
-                        previous_rows_by_alias.get(alias, {}).get(
-                            "_dailyRefreshSuccessDay"
-                        )
-                        or ""
-                    )
-                    != today_key,
+                    ignore_auth_block=False,
                 )
             )
     else:
@@ -3581,13 +3584,7 @@ def build_dashboard_rows(
                     fetch_catalog_fn,
                     previous_rows_by_alias.get(alias),
                     record_refreshed_profile,
-                    str(
-                        previous_rows_by_alias.get(alias, {}).get(
-                            "_dailyRefreshSuccessDay"
-                        )
-                        or ""
-                    )
-                    != today_key,
+                    False,
                 ): (alias, raw_profile)
                 for alias, raw_profile in scheduled_items
             }
