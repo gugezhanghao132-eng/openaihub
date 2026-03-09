@@ -42,9 +42,10 @@ class DummyResponse(requests.Response):
 
 class LoginRegionRestrictionTests(unittest.TestCase):
     def test_init_success_detail_marks_remote_auth_unverified(self) -> None:
-        detail = MODULE.build_init_success_detail("自动登录助手")
+        detail = MODULE.build_init_success_detail()
 
         self.assertIn("本地初始化", detail)
+        self.assertIn("测试写入恢复", detail)
         self.assertIn("未验证 OpenAI 账号地区/网络资格", detail)
 
     def test_complete_login_session_translates_region_restriction(self) -> None:

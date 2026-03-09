@@ -2007,7 +2007,7 @@ def build_init_failure_detail(reason: str, target_path: Path | None = None) -> s
     if reason == "openclaw-program-missing":
         return "未检测到本机已安装的 OpenClAW 程序。\n建议先正常安装 OpenClAW，并确认 `openclaw` 命令可在终端里直接运行后，再重新检测。"
     if reason == "openclaw-provider-unavailable":
-        return "已检测到 OpenClAW 程序，但无法确认 openai-codex 登录能力可用。\n请先确认 OpenClAW 安装完整、插件可正常加载，再重新检测。"
+        return "已检测到 OpenClAW 程序，但无法确认 openai-codex 登录能力可用。\n请先确认 OpenClAW 插件可正常加载，或者内置登录助手/runtime 完整可用后，再重新检测。"
     if reason == "openclaw-switch-target-unavailable":
         return f"OpenClAW 切换目标文件当前不可用，程序无法确认后续切号能成功写入。{path_text}\n请检查该目录/文件是否可读、可写、未被占用，并确认防病毒或同步盘没有锁住这些文件。"
     if reason == "openclaw-root-missing":
@@ -2057,25 +2057,18 @@ def detect_init_hard_failure(
     openclaw_provider_probe_fn: Callable[[str], bool],
 ) -> JsonDict | None:
     if variant_requires_local_openclaw_install():
-        if not openclaw_program_probe_fn():
-            return build_init_failure("openclaw-program-missing")
         if not root.exists() or not root.is_dir():
             return build_init_failure("openclaw-root-missing", root)
         agents_root = root_agents_dir(root)
         if not agents_root.exists() or not agents_root.is_dir():
             return build_init_failure("openclaw-agents-missing", agents_root)
     if variant_requires_opencode_config():
-        if not opencode_program_probe_fn():
-            return build_init_failure("opencode-program-missing")
         config_dir = opencode_config_path.parent
         if not config_dir.exists() or not config_dir.is_dir():
             return build_init_failure("opencode-config-dir-missing", config_dir)
         state_dir = opencode_auth_path.parent
         if not state_dir.exists() or not state_dir.is_dir():
             return build_init_failure("opencode-state-dir-missing", state_dir)
-    if variant_requires_local_openclaw_install():
-        if not openclaw_provider_probe_fn(PROVIDER_KEY):
-            return build_init_failure("openclaw-provider-unavailable")
     return None
 
 
@@ -2087,11 +2080,11 @@ def describe_switch_target_scope() -> str:
     return "OpenClAW"
 
 
-def build_init_success_detail(login_mode_label: str) -> str:
+def build_init_success_detail() -> str:
     return (
         "本地初始化已完成并验证通过\n"
-        f"当前登录方式：{login_mode_label}\n"
         f"当前切号目标：{describe_switch_target_scope()}\n"
+        "已校验目标路径、目标文件、文件内容与测试写入恢复\n"
         "未验证 OpenAI 账号地区/网络资格；首次真实登录时仍可能被远端策略拒绝"
     )
 
@@ -2125,22 +2118,133 @@ def probe_json_target_writable(path: Path) -> None:
         raise ValueError("目标文件回读结果与原始内容不一致")
 
 
+def build_init_probe_profile() -> JsonDict:
+    return normalize_saved_profile(
+        {
+            "access": "openaihub-init-probe-access",
+            "refresh": "openaihub-init-probe-refresh",
+            "expires": 4102444800000,
+            "accountId": "openaihub-init-probe-account",
+            "email": "probe@openaihub.local",
+            "displayName": "OpenAI Hub Init Probe",
+        }
+    )
+
+
+def probe_openclaw_agent_switch_target(adir: Path) -> None:
+    auth_path = adir / "auth.json"
+    profiles_path = adir / "auth-profiles.json"
+    original_auth = read_json_object_strict(auth_path)
+    original_profiles = read_json_object_strict(profiles_path)
+    probe_profile = build_init_probe_profile()
+
+    with auth_path.open("r+", encoding="utf-8"):
+        pass
+    with profiles_path.open("r+", encoding="utf-8"):
+        pass
+
+    auth_probe = copy.deepcopy(original_auth)
+    auth_probe[PROVIDER_KEY] = {
+        "type": "oauth",
+        "access": probe_profile.get("access", ""),
+        "refresh": probe_profile.get("refresh", ""),
+        "expires": probe_profile.get("expires", 0),
+        "accountId": probe_profile.get("accountId", ""),
+    }
+    profiles_probe = copy.deepcopy(original_profiles)
+    profiles_probe.setdefault("version", 1)
+    profiles_probe.setdefault("profiles", {})
+    profiles_probe["profiles"][PROFILE_KEY] = {
+        "type": "oauth",
+        "provider": PROVIDER_KEY,
+        "access": probe_profile.get("access", ""),
+        "refresh": probe_profile.get("refresh", ""),
+        "expires": probe_profile.get("expires", 0),
+        "accountId": probe_profile.get("accountId", ""),
+    }
+    profiles_probe.setdefault("lastGood", {})
+    profiles_probe["lastGood"][PROVIDER_KEY] = PROFILE_KEY
+    profiles_probe.setdefault("usageStats", {})
+    profiles_probe["usageStats"].setdefault(
+        PROFILE_KEY, {"lastUsed": 0, "errorCount": 0}
+    )
+
+    try:
+        write_json(auth_path, auth_probe)
+        write_json(profiles_path, profiles_probe)
+        written_auth = read_json_object_strict(auth_path)
+        written_profiles = read_json_object_strict(profiles_path)
+        if (
+            str((written_auth.get(PROVIDER_KEY) or {}).get("refresh") or "")
+            != probe_profile["refresh"]
+        ):
+            raise ValueError("OpenClAW auth.json 测试写入回读失败")
+        if (
+            str(
+                (written_profiles.get("profiles", {}).get(PROFILE_KEY) or {}).get(
+                    "refresh"
+                )
+                or ""
+            )
+            != probe_profile["refresh"]
+        ):
+            raise ValueError("OpenClAW auth-profiles.json 测试写入回读失败")
+    finally:
+        write_json(auth_path, original_auth)
+        write_json(profiles_path, original_profiles)
+
+    if read_json_object_strict(auth_path) != original_auth:
+        raise ValueError("OpenClAW auth.json 恢复失败")
+    if read_json_object_strict(profiles_path) != original_profiles:
+        raise ValueError("OpenClAW auth-profiles.json 恢复失败")
+
+
+def probe_opencode_switch_target(auth_path: Path) -> None:
+    original_auth = read_json_object_strict(auth_path)
+    probe_profile = build_init_probe_profile()
+
+    with auth_path.open("r+", encoding="utf-8"):
+        pass
+
+    probe_auth = copy.deepcopy(original_auth)
+    probe_auth["openai"] = {
+        "type": "oauth",
+        "access": probe_profile.get("access", ""),
+        "refresh": probe_profile.get("refresh", ""),
+        "expires": probe_profile.get("expires", 0),
+        "accountId": probe_profile.get("accountId", ""),
+    }
+
+    try:
+        write_json(auth_path, probe_auth)
+        written_auth = read_json_object_strict(auth_path)
+        if (
+            str((written_auth.get("openai") or {}).get("refresh") or "")
+            != probe_profile["refresh"]
+        ):
+            raise ValueError("OpenCode auth.json 测试写入回读失败")
+    finally:
+        write_json(auth_path, original_auth)
+
+    if read_json_object_strict(auth_path) != original_auth:
+        raise ValueError("OpenCode auth.json 恢复失败")
+
+
 def probe_switch_targets(
     root: Path = ROOT,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
 ) -> JsonDict | None:
     if variant_is_openclaw():
         for adir in agent_dirs(root):
-            for target_path in [adir / "auth.json", adir / "auth-profiles.json"]:
-                try:
-                    probe_json_target_writable(target_path)
-                except Exception:
-                    return build_init_failure(
-                        "openclaw-switch-target-unavailable", target_path
-                    )
+            try:
+                probe_openclaw_agent_switch_target(adir)
+            except Exception:
+                return build_init_failure(
+                    "openclaw-switch-target-unavailable", adir / "auth.json"
+                )
     if variant_is_opencode():
         try:
-            probe_json_target_writable(opencode_auth_path)
+            probe_opencode_switch_target(opencode_auth_path)
         except Exception:
             return build_init_failure(
                 "opencode-switch-target-unavailable", opencode_auth_path
@@ -2291,19 +2395,14 @@ def verify_initialized_environment(
     ):
         return build_init_failure("init-marker-missing", resolved_openclaw_config_path)
 
-    login_mode, login_mode_label = describe_login_method()
-
     return {
         "ok": True,
         "reason": None,
-        "detail": build_init_success_detail(login_mode_label),
+        "detail": build_init_success_detail(),
         "openclaw_config_path": resolved_openclaw_config_path,
         "opencode_config_path": opencode_config_path,
         "opencode_auth_path": opencode_auth_path,
         "agent_model_files": model_files,
-        "loginHelperAvailable": login_mode == "helper",
-        "loginMode": login_mode,
-        "loginModeLabel": login_mode_label,
     }
 
 
@@ -4495,7 +4594,6 @@ def cmd_init(
         return 1
     print("初始化完成")
     if variant_requires_openclaw_login():
-        print(f"- 当前登录方式：{verification.get('loginModeLabel') or '手动回调'}")
         print(f"- 当前切号目标：{describe_switch_target_scope()}")
         if variant_requires_local_openclaw_install():
             print(f"- OpenClAW 根目录：{summary['root']}")
