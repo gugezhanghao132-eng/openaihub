@@ -5,7 +5,7 @@
 ```bash
 cd 1.1/npm
 npm pack
-npm install -g ./openaihub-1.1.8.tgz
+npm install -g ./openaihub-1.1.9.tgz
 openaihub --version
 OAH --version
 ```
@@ -42,7 +42,9 @@ npm install -g openaihub
 
 ## Platform support
 
-- Windows x64 only for the current public package
+- Windows x64
+- macOS arm64
+- macOS x64
 
 ## Uninstall
 

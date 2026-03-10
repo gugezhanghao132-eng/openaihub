@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/gugezhanghao132-eng/openaihub/main/
 - `npm` 是当前最推荐的安装方式
 - Windows 可以直接用 `irm`
 - macOS 可以用 `curl | sh` 作为直装入口
-- 当前已经完整实测通过的是 Windows 侧；macOS 直装链路仍在补充公开验证
+- npm 和 GitHub release 安装链路支持 Windows x64、macOS arm64、macOS x64
 
 安装后默认目录：
 
@@ -244,8 +244,8 @@ macOS 用户同样按这个默认目录检测：
 
 ## 当前状态
 
-- npm 包将发布：`openaihub@1.1.8`
+- npm 包将发布：`openaihub@1.1.9`
 - npm 安装命令已可直接使用
 - 已验证命令：`openaihub`、`OAH`、`openaihub --version`
 - GitHub Release 的 Windows 资产已发布
-- macOS 公开运行时分发仍在补充验证
+- macOS 公开运行时分发通过 release 资产按架构提供
