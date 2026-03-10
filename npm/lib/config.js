@@ -9,10 +9,7 @@ const bundledRuntimeRoot = path.join(packageRoot, 'runtime');
 
 const packageInfo = require(path.join(packageRoot, 'package.json'));
 
-function getPlatformConfig() {
-  const platform = process.platform;
-  const arch = process.arch;
-
+function resolvePlatformConfig(platform, arch) {
   if (platform === 'win32' && arch === 'x64') {
     return {
       assetName: 'openaihub-windows.zip',
@@ -23,7 +20,31 @@ function getPlatformConfig() {
     };
   }
 
+  if (platform === 'darwin' && arch === 'arm64') {
+    return {
+      assetName: 'openaihub-macos-arm64.tar.gz',
+      assetDownloadUrl: `https://github.com/gugezhanghao132-eng/openaihub/releases/download/${getTagName()}/openaihub-macos-arm64.tar.gz`,
+      executableRelativePath: path.join('openaihub-bin'),
+      extractKind: 'tar.gz',
+      runtimeKey: 'darwin-arm64'
+    };
+  }
+
+  if (platform === 'darwin' && arch === 'x64') {
+    return {
+      assetName: 'openaihub-macos-x64.tar.gz',
+      assetDownloadUrl: `https://github.com/gugezhanghao132-eng/openaihub/releases/download/${getTagName()}/openaihub-macos-x64.tar.gz`,
+      executableRelativePath: path.join('openaihub-bin'),
+      extractKind: 'tar.gz',
+      runtimeKey: 'darwin-x64'
+    };
+  }
+
   throw new Error(`OpenAI Hub npm package does not support ${platform}-${arch} yet.`);
+}
+
+function getPlatformConfig() {
+  return resolvePlatformConfig(process.platform, process.arch);
 }
 
 function getTagName() {
@@ -39,5 +60,6 @@ module.exports = {
   bundledRuntimeRoot,
   runtimeRoot,
   getTagName,
+  resolvePlatformConfig,
   getPlatformConfig
 };

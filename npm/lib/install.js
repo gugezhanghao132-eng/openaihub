@@ -142,6 +142,11 @@ async function extractArchive(archivePath, extractRoot, extractKind) {
     return;
   }
 
+  if (extractKind === 'tar.gz') {
+    await runCommand('tar', ['-xzf', archivePath, '-C', extractRoot]);
+    return;
+  }
+
   throw new Error(`Unsupported archive extraction for ${process.platform}: ${extractKind}`);
 }
 
@@ -225,6 +230,9 @@ async function ensureInstalled(options = {}) {
     await removePathWithRetry(runtimeDir);
     await fsp.mkdir(runtimeBaseDir, { recursive: true });
     await fsp.rename(stageRoot, runtimeDir);
+    if (process.platform !== 'win32') {
+      await fsp.chmod(path.join(runtimeDir, platformConfig.executableRelativePath), 0o755);
+    }
 
     if (!quiet) {
       log('Runtime ready.');
