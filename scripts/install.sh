@@ -4,13 +4,29 @@ set -euo pipefail
 INSTALL_ROOT="$HOME/.openaihub"
 BIN_ROOT="$INSTALL_ROOT/bin"
 SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOURCE_DIST="$SOURCE_ROOT/dist/openaihub-macos"
 VERSION_FILE="$SOURCE_ROOT/package/version.txt"
 REPO_OWNER="gugezhanghao132-eng"
 REPO_NAME="openaihub"
-ASSET_NAME="openaihub-macos.tar.gz"
 LATEST_RELEASE_API="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
 ALREADY_INSTALLED=0
+
+ARCH_NAME="$(uname -m)"
+case "$ARCH_NAME" in
+  arm64|aarch64)
+    MAC_ARCH="arm64"
+    ;;
+  x86_64)
+    MAC_ARCH="x64"
+    ;;
+  *)
+    echo "Unsupported macOS architecture: $ARCH_NAME"
+    exit 1
+    ;;
+esac
+
+ASSET_NAME="openaihub-macos-$MAC_ARCH.tar.gz"
+SOURCE_DIST="$SOURCE_ROOT/dist/openaihub-macos-$MAC_ARCH"
+LEGACY_SOURCE_DIST="$SOURCE_ROOT/dist/openaihub-macos"
 
 if [ -x "$BIN_ROOT/openaihub-bin" ]; then
   ALREADY_INSTALLED=1
@@ -29,6 +45,8 @@ PAYLOAD_BIN_ROOT="$PAYLOAD_ROOT/bin"
 REMOTE_MODE=1
 
 if [ -x "$SOURCE_DIST/openaihub-bin" ]; then
+  REMOTE_MODE=0
+elif [ -x "$LEGACY_SOURCE_DIST/openaihub-bin" ]; then
   REMOTE_MODE=0
 fi
 
@@ -68,7 +86,11 @@ if [ "$REMOTE_MODE" -eq 1 ]; then
   fi
 else
   VERSION_TEXT="$(cat "$VERSION_FILE")"
-  PAYLOAD_BIN_ROOT="$SOURCE_DIST"
+  if [ -x "$SOURCE_DIST/openaihub-bin" ]; then
+    PAYLOAD_BIN_ROOT="$SOURCE_DIST"
+  else
+    PAYLOAD_BIN_ROOT="$LEGACY_SOURCE_DIST"
+  fi
 fi
 
 show_step '2/5' 'Cleaning previous files...'
