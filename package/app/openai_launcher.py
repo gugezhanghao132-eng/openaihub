@@ -9,7 +9,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-APP_RELEASE_VERSION = "1.1.10"
+APP_RELEASE_VERSION = "1.1.11"
 APP_COMMAND_NAME = "openaihub"
 APP_SHORT_COMMAND = "OAH"
 
