@@ -98,21 +98,11 @@ npm -v
 
 如果这条命令能正常输出版本号，说明你已经有 npm，可以直接安装 OpenAI Hub。
 
-如果这条命令报错，说明你的电脑里还没有 npm。你需要先安装 Node.js（安装 Node.js 时通常会一起带上 npm），然后才能使用：
-
-```bash
-npm install -g openaihub
-```
+如果这条命令报错，说明你的电脑里还没有 npm。你需要先安装 Node.js（安装 Node.js 时通常会一起带上 npm）。
 
 ### 第二步：安装 OpenAI Hub
 
 推荐优先使用：
-
-```bash
-npm install -g openaihub
-```
-
-当前不再提供额外的直装命令，统一使用：
 
 ```bash
 npm install -g openaihub
@@ -139,6 +129,12 @@ OAH
 ### 第五步：选择模式
 
 启动后，先选模式，再初始化，再进入主页面。
+
+## 程序截图
+
+![程序截图 1](assets/program-screenshot-1.png)
+
+![程序截图 2](assets/program-screenshot-2.png)
 
 ## 模式对照表
 
