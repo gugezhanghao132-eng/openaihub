@@ -1,11 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+
+ROOT = Path.cwd().resolve()
+
 
 a = Analysis(
-    ['C:\\Users\\maobin666\\Desktop\\openclaw-gpt\\1.1\\package\\app\\openai_launcher.py'],
-    pathex=[],
+    [str(ROOT / 'package' / 'app' / 'openai_launcher.py')],
+    pathex=[str(ROOT / 'package' / 'app')],
     binaries=[],
-    datas=[('C:\\Users\\maobin666\\Desktop\\openclaw-gpt\\1.1\\package\\app\\openai_codex_login_helper.mjs', '.'), ('C:\\Users\\maobin666\\Desktop\\openclaw-gpt\\1.1\\package\\app\\bundled_runtime', 'bundled_runtime')],
+    datas=[
+        (str(ROOT / 'package' / 'app' / 'openai_codex_login_helper.mjs'), '.'),
+        (str(ROOT / 'package' / 'app' / 'openclaw_restart_gateway.ps1'), '.'),
+        (str(ROOT / 'package' / 'app' / 'openclaw_restart_gateway.sh'), '.'),
+        (str(ROOT / 'package' / 'app' / 'bundled_runtime'), 'bundled_runtime'),
+    ],
     hiddenimports=['openclaw_oauth_switcher'],
     hookspath=[],
     hooksconfig={},

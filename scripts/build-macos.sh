@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENTRY_SCRIPT="$ROOT_DIR/package/app/openai_launcher.py"
 HELPER_SCRIPT="$ROOT_DIR/package/app/openai_codex_login_helper.mjs"
+RESTART_HELPER_PS1="$ROOT_DIR/package/app/openclaw_restart_gateway.ps1"
+RESTART_HELPER_SH="$ROOT_DIR/package/app/openclaw_restart_gateway.sh"
 OAUTH_DIR="$ROOT_DIR/package/app/bundled_runtime/oauth"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/build-macos"
@@ -55,6 +57,8 @@ ARGS=(
   --workpath "$BUILD_DIR"
   --specpath "$SPEC_DIR"
   --add-data "$HELPER_SCRIPT:."
+  --add-data "$RESTART_HELPER_PS1:."
+  --add-data "$RESTART_HELPER_SH:."
   --add-data "$OAUTH_DIR:bundled_runtime/oauth"
 )
 
@@ -64,8 +68,13 @@ fi
 
 python3 -m PyInstaller "${ARGS[@]}" "$ENTRY_SCRIPT"
 
-mv "$DIST_DIR/openaihub" "$DIST_DIR/openaihub-macos"
-mv "$DIST_DIR/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME"
+BUILD_OUTPUT_ROOT="$(find "$DIST_DIR" -maxdepth 1 -mindepth 1 -type d ! -name "$OUTPUT_DIR_NAME" -print -quit)"
+if [ -z "$BUILD_OUTPUT_ROOT" ] || [ ! -d "$BUILD_OUTPUT_ROOT" ]; then
+  echo "PyInstaller did not create an onedir output under $DIST_DIR"
+  exit 1
+fi
+
+mv "$BUILD_OUTPUT_ROOT" "$DIST_DIR/$OUTPUT_DIR_NAME"
 mv "$DIST_DIR/$OUTPUT_DIR_NAME/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME/openaihub-bin"
 cp "$ROOT_DIR/package/bin/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME/openaihub"
 cp "$ROOT_DIR/package/bin/OAH" "$DIST_DIR/$OUTPUT_DIR_NAME/OAH"
