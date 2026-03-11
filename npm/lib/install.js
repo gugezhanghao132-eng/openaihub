@@ -252,16 +252,21 @@ async function ensureInstalled(options = {}) {
     await fsp.mkdir(extractRoot, { recursive: true });
     await fsp.mkdir(stageRoot, { recursive: true });
 
-    if (fs.existsSync(bundledArchivePath)) {
+    if (!quiet) {
+      log(`Downloading ${platformConfig.assetName}...`);
+    }
+
+    try {
+      await withRetry(() => downloadFile(platformConfig.assetDownloadUrl, archivePath), 3, 'Runtime download');
+    } catch (downloadError) {
+      if (!fs.existsSync(bundledArchivePath)) {
+        throw downloadError;
+      }
+
       if (!quiet) {
-        log(`Using bundled runtime archive ${platformConfig.assetName}...`);
+        log(`Download failed, falling back to bundled runtime archive ${platformConfig.assetName}...`);
       }
       await fsp.copyFile(bundledArchivePath, archivePath);
-    } else {
-      if (!quiet) {
-        log(`Downloading ${platformConfig.assetName}...`);
-      }
-      await withRetry(() => downloadFile(platformConfig.assetDownloadUrl, archivePath), 3, 'Runtime download');
     }
 
     if (!quiet) {

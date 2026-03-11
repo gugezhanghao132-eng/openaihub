@@ -119,3 +119,17 @@ class NpmPlatformConfigTests(unittest.TestCase):
         self.assertIn("openaihub.js", script)
         self.assertIn("OAH.js", script)
         self.assertIn("ensureLauncherEntrypointsExecutable", script)
+
+    def test_npm_install_script_prefers_release_download_before_bundled_fallback(
+        self,
+    ) -> None:
+        script = (NPM_DIR / "lib" / "install.js").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Download failed, falling back to bundled runtime archive", script
+        )
+        self.assertIn(
+            "await withRetry(() => downloadFile(platformConfig.assetDownloadUrl, archivePath)",
+            script,
+        )
+        self.assertIn("await fsp.copyFile(bundledArchivePath, archivePath)", script)
