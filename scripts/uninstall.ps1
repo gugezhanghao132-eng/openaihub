@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $InstallRoot = Join-Path $env:USERPROFILE '.openaihub'
 $BinRoot = Join-Path $InstallRoot 'bin'
+$RuntimeRoot = Join-Path $InstallRoot 'npm-runtime'
 
 function Invoke-WithSpinner {
   param(
@@ -47,5 +48,9 @@ Invoke-WithSpinner -Message 'Updating PATH...' -Action {
 
 Write-Host 'OpenAI Hub uninstall complete.'
 Write-Host 'Command aliases removed from PATH.'
+if (Test-Path $RuntimeRoot) {
+  Remove-Item -Path $RuntimeRoot -Recurse -Force
+  Write-Host ('Removed runtime files at: ' + $RuntimeRoot)
+}
 Write-Host ('User data preserved at: ' + $InstallRoot)
 Write-Host 'If you want to fully remove saved accounts and config, delete that folder manually.'
