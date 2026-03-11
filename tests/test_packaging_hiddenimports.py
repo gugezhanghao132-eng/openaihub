@@ -11,6 +11,12 @@ class PackagingHiddenImportsTests(unittest.TestCase):
         spec_text = SPEC_PATH.read_text(encoding="utf-8")
         self.assertIn("openclaw_oauth_switcher", spec_text)
 
+    def test_spec_includes_runtime_http_and_ui_dependencies(self) -> None:
+        spec_text = SPEC_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("'requests'", spec_text)
+        self.assertIn("'rich'", spec_text)
+
     def test_spec_bundles_openclaw_restart_helpers(self) -> None:
         spec_text = SPEC_PATH.read_text(encoding="utf-8")
 

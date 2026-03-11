@@ -16,7 +16,11 @@ a = Analysis(
         (str(ROOT / 'package' / 'app' / 'openclaw_restart_gateway.sh'), '.'),
         (str(ROOT / 'package' / 'app' / 'bundled_runtime'), 'bundled_runtime'),
     ],
-    hiddenimports=['openclaw_oauth_switcher'],
+    hiddenimports=[
+        'openclaw_oauth_switcher',
+        'requests',
+        'rich',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
