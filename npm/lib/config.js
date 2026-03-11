@@ -4,7 +4,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const packageRoot = path.resolve(__dirname, '..');
-const runtimeRoot = path.join(os.homedir(), '.openaihub', 'npm-runtime');
+const runtimeRoot = path.join(packageRoot, '.runtime');
+const legacyRuntimeRoot = path.join(os.homedir(), '.openaihub', 'npm-runtime');
 const bundledRuntimeRoot = path.join(packageRoot, 'runtime');
 
 const packageInfo = require(path.join(packageRoot, 'package.json'));
@@ -59,6 +60,7 @@ module.exports = {
   packageRoot,
   bundledRuntimeRoot,
   runtimeRoot,
+  legacyRuntimeRoot,
   getTagName,
   resolvePlatformConfig,
   getPlatformConfig

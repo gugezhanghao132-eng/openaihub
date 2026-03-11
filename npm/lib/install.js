@@ -9,6 +9,8 @@ const { spawn } = require('node:child_process');
 
 const {
   bundledRuntimeRoot,
+  legacyRuntimeRoot,
+  packageRoot,
   packageVersion,
   runtimeRoot,
   getPlatformConfig,
@@ -150,6 +152,51 @@ async function extractArchive(archivePath, extractRoot, extractKind) {
   throw new Error(`Unsupported archive extraction for ${process.platform}: ${extractKind}`);
 }
 
+async function ensureLauncherEntrypointsExecutable() {
+  if (process.platform === 'win32') {
+    return;
+  }
+
+  await Promise.all([
+    fsp.chmod(path.join(packageRoot, 'bin', 'openaihub.js'), 0o755),
+    fsp.chmod(path.join(packageRoot, 'bin', 'OAH.js'), 0o755),
+  ]);
+}
+
+async function removeLegacyRuntimeRoot() {
+  if (legacyRuntimeRoot === runtimeRoot) {
+    return;
+  }
+
+  await removePathWithRetry(legacyRuntimeRoot);
+}
+
+async function copyRuntimePreservingLayout(sourceRoot, targetRoot, extractKind) {
+  if (extractKind === 'tar.gz' && process.platform !== 'win32') {
+    await runCommand('cp', ['-RP', `${sourceRoot}${path.sep}.`, targetRoot]);
+    return;
+  }
+
+  await fsp.cp(sourceRoot, targetRoot, { recursive: true, force: true });
+}
+
+async function validateRuntimeLayout(runtimeDir, platformConfig) {
+  const runtimeExecutablePath = path.join(runtimeDir, platformConfig.executableRelativePath);
+  await fsp.access(runtimeExecutablePath, fs.constants.F_OK);
+
+  if (process.platform !== 'win32') {
+    await fsp.chmod(runtimeExecutablePath, 0o755);
+  }
+
+  if (platformConfig.extractKind !== 'tar.gz') {
+    return;
+  }
+
+  const pythonShimPath = path.join(runtimeDir, '_internal', 'Python');
+  await fsp.lstat(pythonShimPath);
+  await fsp.realpath(pythonShimPath);
+}
+
 function findExecutable(extractRoot, executableName) {
   const stack = [extractRoot];
   while (stack.length > 0) {
@@ -172,8 +219,8 @@ function findExecutable(extractRoot, executableName) {
 async function ensureInstalled(options = {}) {
   const { quiet = false, force = false } = options;
   const platformConfig = getPlatformConfig();
-  const runtimeBaseDir = path.join(runtimeRoot, platformConfig.runtimeKey);
-  const runtimeDir = path.join(runtimeBaseDir, packageVersion);
+  const runtimeBaseDir = runtimeRoot;
+  const runtimeDir = path.join(runtimeBaseDir, platformConfig.runtimeKey);
   const executablePath = path.join(runtimeDir, platformConfig.executableRelativePath);
   const bundledArchivePath = path.join(bundledRuntimeRoot, platformConfig.assetName);
   const versionMarkerPath = path.join(runtimeDir, 'version.txt');
@@ -193,8 +240,10 @@ async function ensureInstalled(options = {}) {
   let lockHandle = null;
 
   try {
+    await ensureLauncherEntrypointsExecutable();
     await fsp.mkdir(runtimeRoot, { recursive: true });
     lockHandle = await acquireLock(lockPath);
+    await removeLegacyRuntimeRoot();
 
     if (!quiet) {
       log(`Preparing OpenAI Hub ${packageVersion} for ${platformConfig.runtimeKey}...`);
@@ -225,14 +274,13 @@ async function ensureInstalled(options = {}) {
       throw new Error(`Executable ${platformConfig.executableRelativePath} was not found in downloaded asset.`);
     }
 
-    await fsp.cp(extractedRuntimeRoot, stageRoot, { recursive: true, force: true });
+    await copyRuntimePreservingLayout(extractedRuntimeRoot, stageRoot, platformConfig.extractKind);
     await fsp.writeFile(path.join(stageRoot, 'version.txt'), `${packageVersion}\n`, 'utf8');
+    await validateRuntimeLayout(stageRoot, platformConfig);
     await removePathWithRetry(runtimeDir);
     await fsp.mkdir(runtimeBaseDir, { recursive: true });
     await fsp.rename(stageRoot, runtimeDir);
-    if (process.platform !== 'win32') {
-      await fsp.chmod(path.join(runtimeDir, platformConfig.executableRelativePath), 0o755);
-    }
+    await validateRuntimeLayout(runtimeDir, platformConfig);
 
     if (!quiet) {
       log('Runtime ready.');
