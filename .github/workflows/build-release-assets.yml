@@ -44,7 +44,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             expected_asset: openaihub-macos-x64.tar.gz
           - runner: macos-14
             expected_asset: openaihub-macos-arm64.tar.gz
