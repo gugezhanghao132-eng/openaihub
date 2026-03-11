@@ -3,15 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENTRY_SCRIPT="$ROOT_DIR/package/app/openai_launcher.py"
-HELPER_SCRIPT="$ROOT_DIR/package/app/openai_codex_login_helper.mjs"
-RESTART_HELPER_PS1="$ROOT_DIR/package/app/openclaw_restart_gateway.ps1"
-RESTART_HELPER_SH="$ROOT_DIR/package/app/openclaw_restart_gateway.sh"
-OAUTH_DIR="$ROOT_DIR/package/app/bundled_runtime/oauth"
+SPEC_FILE="$ROOT_DIR/openaihub.spec"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/build-macos"
 SPEC_DIR="$ROOT_DIR/spec-macos"
-TMP_DIR="$ROOT_DIR/.tmp-runtime-macos"
 RELEASE_DIR="$ROOT_DIR/release-assets"
 ARCH_NAME="$(uname -m)"
 
@@ -37,41 +32,24 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 if ! python3 -m PyInstaller --version >/dev/null 2>&1; then
-  echo "PyInstaller not found. Run: python3 -m pip install pyinstaller"
+  echo "PyInstaller not found. Run: python3 -m pip install -r scripts/build-requirements.txt"
   exit 1
 fi
 
-rm -rf "$DIST_DIR/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME" "$BUILD_DIR" "$SPEC_DIR" "$TMP_DIR"
-mkdir -p "$TMP_DIR/bundled_runtime/node"
+rm -rf "$DIST_DIR/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME" "$BUILD_DIR" "$SPEC_DIR"
 
-if command -v node >/dev/null 2>&1; then
-  cp "$(command -v node)" "$TMP_DIR/bundled_runtime/node/node"
-fi
+cd "$ROOT_DIR"
+python3 -m PyInstaller "$SPEC_FILE" -y --distpath "$DIST_DIR" --workpath "$BUILD_DIR" --specpath "$SPEC_DIR" --clean
 
-ARGS=(
-  --noconfirm
-  --clean
-  --onedir
-  --name openaihub
-  --distpath "$DIST_DIR"
-  --workpath "$BUILD_DIR"
-  --specpath "$SPEC_DIR"
-  --add-data "$HELPER_SCRIPT:."
-  --add-data "$RESTART_HELPER_PS1:."
-  --add-data "$RESTART_HELPER_SH:."
-  --add-data "$OAUTH_DIR:bundled_runtime/oauth"
-)
-
-if [ -f "$TMP_DIR/bundled_runtime/node/node" ]; then
-  ARGS+=(--add-data "$TMP_DIR/bundled_runtime/node:bundled_runtime/node")
-fi
-
-python3 -m PyInstaller "${ARGS[@]}" "$ENTRY_SCRIPT"
-
-BUILD_OUTPUT_ROOT="$(find "$DIST_DIR" -maxdepth 1 -mindepth 1 -type d ! -name "$OUTPUT_DIR_NAME" -print -quit)"
-if [ -z "$BUILD_OUTPUT_ROOT" ] || [ ! -d "$BUILD_OUTPUT_ROOT" ]; then
+BUILD_OUTPUT_ROOT="$DIST_DIR/openaihub"
+if [ ! -d "$BUILD_OUTPUT_ROOT" ]; then
   echo "PyInstaller did not create an onedir output under $DIST_DIR"
   exit 1
+fi
+
+if command -v node >/dev/null 2>&1; then
+  mkdir -p "$BUILD_OUTPUT_ROOT/bundled_runtime/node"
+  cp "$(command -v node)" "$BUILD_OUTPUT_ROOT/bundled_runtime/node/node"
 fi
 
 mv "$BUILD_OUTPUT_ROOT" "$DIST_DIR/$OUTPUT_DIR_NAME"

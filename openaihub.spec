@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-ROOT = Path.cwd().resolve()
+ROOT = Path(SPEC).resolve().parent
 
 
 a = Analysis(
