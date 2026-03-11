@@ -39,7 +39,7 @@ fi
 rm -rf "$DIST_DIR/openaihub" "$DIST_DIR/$OUTPUT_DIR_NAME" "$BUILD_DIR" "$SPEC_DIR"
 
 cd "$ROOT_DIR"
-python3 -m PyInstaller "$SPEC_FILE" -y --distpath "$DIST_DIR" --workpath "$BUILD_DIR" --specpath "$SPEC_DIR" --clean
+python3 -m PyInstaller "$SPEC_FILE" -y --distpath "$DIST_DIR" --workpath "$BUILD_DIR" --clean
 
 BUILD_OUTPUT_ROOT="$DIST_DIR/openaihub"
 if [ ! -d "$BUILD_OUTPUT_ROOT" ]; then
