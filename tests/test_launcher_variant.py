@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import contextmanager
 import os
 import sys
 import unittest
@@ -53,6 +54,100 @@ class LauncherVariantTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(seen_variants, ["opencode"])
+
+    def test_switcher_menu_prompts_variant_when_env_missing(self) -> None:
+        original_argv = list(sys.argv)
+        original_env = os.environ.get("GT_VARIANT")
+        sys.modules.pop("openclaw_oauth_switcher", None)
+
+        @contextmanager
+        def no_cursor():
+            yield
+
+        try:
+            os.environ.pop("GT_VARIANT", None)
+            switcher = load_module("openclaw_oauth_switcher", SWITCHER_PATH)
+            seen_variants: list[str] = []
+
+            setattr(switcher, "choose_from_menu", lambda **_kwargs: {"key": "openclaw"})
+            setattr(switcher, "set_default_console_size", lambda: None)
+            setattr(switcher, "hidden_cursor", no_cursor)
+            setattr(
+                switcher,
+                "cmd_menu",
+                lambda: seen_variants.append(switcher.get_app_variant()) or 0,
+            )
+
+            sys.argv = [str(SWITCHER_PATH), "menu"]
+            exit_code = switcher.main()
+        finally:
+            sys.argv = original_argv
+            if original_env is None:
+                os.environ.pop("GT_VARIANT", None)
+            else:
+                os.environ["GT_VARIANT"] = original_env
+            sys.modules.pop("openclaw_oauth_switcher", None)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(seen_variants, ["openclaw"])
+
+    def test_cmd_menu_starts_full_refresh_worker_after_loading_snapshot(self) -> None:
+        sys.modules.pop("openclaw_oauth_switcher", None)
+        switcher = load_module("openclaw_oauth_switcher", SWITCHER_PATH)
+
+        calls: list[tuple[str, dict[str, object] | Path]] = []
+
+        def fake_refresh(state, root):
+            state.rows = [{"alias": "cached", "isCurrent": True}]
+            state.dirty = False
+            calls.append(("snapshot", root))
+            return state.rows
+
+        def fake_start_worker(state, root, build_rows_fn=None, message=""):
+            rows = []
+            if callable(build_rows_fn):
+                rows = build_rows_fn(root, previous_rows=list(state.rows))
+            calls.append(("worker", {"root": root, "message": message, "rows": rows}))
+
+        setattr(switcher, "ensure_environment_ready_for_menu", lambda: True)
+        setattr(switcher, "refresh_dashboard_rows_from_store", fake_refresh)
+        setattr(switcher, "start_dashboard_refresh_worker", fake_start_worker)
+        setattr(
+            switcher,
+            "build_dashboard_rows",
+            lambda root,
+            progress_fn=None,
+            previous_rows=None,
+            force_full_refresh=False: [
+                {
+                    "root": root,
+                    "force_full_refresh": force_full_refresh,
+                    "previous_rows": list(previous_rows or []),
+                }
+            ],
+        )
+        setattr(switcher, "choose_from_menu", lambda *args, **kwargs: None)
+
+        exit_code = switcher.cmd_menu()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[0][0], "snapshot")
+        self.assertEqual(calls[1][0], "worker")
+        worker_payload = calls[1][1]
+        if not isinstance(worker_payload, dict):
+            self.fail("worker payload should be a dict")
+        self.assertEqual(worker_payload["message"], "Loading")
+        rows = worker_payload["rows"]
+        if not isinstance(rows, list) or not rows:
+            self.fail("worker rows should be a non-empty list")
+        first_row = rows[0]
+        if not isinstance(first_row, dict):
+            self.fail("worker row should be a dict")
+        self.assertTrue(first_row["force_full_refresh"])
+        self.assertEqual(
+            first_row["previous_rows"],
+            [{"alias": "cached", "isCurrent": True}],
+        )
 
 
 if __name__ == "__main__":

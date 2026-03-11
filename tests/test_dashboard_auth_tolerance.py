@@ -62,6 +62,89 @@ class DashboardAuthToleranceTests(unittest.TestCase):
     def test_default_console_height_increased(self) -> None:
         self.assertEqual(MODULE.DEFAULT_WINDOW_LINES, 33)
 
+    def test_render_home_dashboard_text_shows_current_variant_badge(self) -> None:
+        row = make_previous_row()
+        original_variant = MODULE.get_app_variant()
+        try:
+            MODULE.set_app_variant("openclaw")
+            text = MODULE.render_home_dashboard_text([row], "alpha")
+        finally:
+            MODULE.set_app_variant(original_variant)
+
+        first_line = text.splitlines()[0]
+        self.assertIn("账号中心", first_line)
+        self.assertIn("OpenClAW 模式", text)
+        self.assertIn("OpenClAW 模式", first_line)
+
+    def test_overview_body_viewport_shows_more_below_hint_when_truncated(self) -> None:
+        lines = [f"line-{index}" for index in range(6)]
+
+        visible_lines, normalized_offset, has_above, has_below = (
+            MODULE.slice_overview_body_lines(lines, scroll_offset=0, viewport_height=3)
+        )
+
+        self.assertEqual(visible_lines, ["line-0", "line-1", "line-2"])
+        self.assertEqual(normalized_offset, 0)
+        self.assertFalse(has_above)
+        self.assertTrue(has_below)
+
+    def test_overview_body_viewport_clamps_offset_and_shows_more_above(self) -> None:
+        lines = [f"line-{index}" for index in range(6)]
+
+        visible_lines, normalized_offset, has_above, has_below = (
+            MODULE.slice_overview_body_lines(lines, scroll_offset=99, viewport_height=3)
+        )
+
+        self.assertEqual(visible_lines, ["line-3", "line-4", "line-5"])
+        self.assertEqual(normalized_offset, 3)
+        self.assertTrue(has_above)
+        self.assertFalse(has_below)
+
+    def test_render_overview_screen_shows_scroll_hints_for_small_viewport(self) -> None:
+        rows = []
+        for index in range(6):
+            row = make_previous_row()
+            row["alias"] = f"alias-{index}"
+            row["displayName"] = f"Account-{index}"
+            row["accountId"] = f"acct-{index}"
+            row["isCurrent"] = index == 0
+            rows.append(row)
+
+        text = MODULE.render_overview_screen(
+            rows,
+            "all",
+            scroll_offset=0,
+            body_viewport_height=6,
+        )
+
+        self.assertIn("↓ 继续查看下面账号", text)
+        self.assertNotIn("↑ 上面还有账号", text)
+
+    def test_render_overview_screen_keeps_total_lines_within_viewport_budget(
+        self,
+    ) -> None:
+        rows = []
+        for index in range(8):
+            row = make_previous_row()
+            row["alias"] = f"alias-{index}"
+            row["displayName"] = f"Account-{index}"
+            row["accountId"] = f"acct-{index}"
+            row["isCurrent"] = index == 0
+            rows.append(row)
+
+        state = MODULE.build_overview_screen_state(
+            rows,
+            "all",
+            scroll_offset=3,
+            body_viewport_height=6,
+        )
+        text = str(state["text"])
+        total_lines = len(text.splitlines())
+
+        self.assertLessEqual(total_lines, 8)
+        self.assertTrue(state["hasAbove"])
+        self.assertTrue(state["hasBelow"])
+
     def test_refresh_endpoint_401_immediately_blocks_account(self) -> None:
         previous_row = make_previous_row()
         profile = make_profile()
@@ -338,6 +421,36 @@ class DashboardAuthToleranceTests(unittest.TestCase):
         self.assertIn("网络波动", text)
         self.assertIn("5h", text)
         self.assertNotIn("可能未开启", text)
+
+    def test_render_dashboard_text_keeps_last_sync_on_second_line(self) -> None:
+        row = {
+            **make_previous_row(),
+            "_lastRefreshedAtMs": MODULE.current_time_ms(),
+        }
+
+        text = MODULE.render_dashboard_text([row], "alpha", include_header=False)
+        lines = text.splitlines()
+
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertIn("账号ID", lines[0])
+        self.assertNotIn("上次同步", lines[0])
+        self.assertIn("上次同步", lines[1])
+
+    def test_render_dashboard_text_keeps_sync_issue_on_second_line(self) -> None:
+        row = {
+            **make_previous_row(),
+            "warning": "鉴权接口临时波动，已沿用上次额度数据，本次先不判定账号失效",
+            "_authIssueStatus": 401,
+            "_lastRefreshedAtMs": MODULE.current_time_ms(),
+        }
+
+        text = MODULE.render_dashboard_text([row], "alpha", include_header=False)
+        lines = text.splitlines()
+
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertNotIn("401 可能网络/鉴权", lines[0])
+        self.assertIn("上次同步", lines[1])
+        self.assertIn("401 可能网络/鉴权", lines[1])
 
 
 if __name__ == "__main__":

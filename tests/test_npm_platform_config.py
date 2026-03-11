@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 NPM_DIR = Path(__file__).resolve().parents[1] / "npm"
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def resolve_platform_config(platform: str, arch: str) -> dict[str, object]:
@@ -21,7 +22,24 @@ def resolve_platform_config(platform: str, arch: str) -> dict[str, object]:
     return json.loads(output)
 
 
+def resolve_runtime_root() -> str:
+    script = (
+        "const { runtimeRoot } = require('./lib/config');"
+        "process.stdout.write(String(runtimeRoot));"
+    )
+    return subprocess.check_output(
+        ["node", "-e", script],
+        cwd=NPM_DIR,
+        text=True,
+    ).strip()
+
+
 class NpmPlatformConfigTests(unittest.TestCase):
+    def test_runtime_root_stays_under_openaihub_npm_runtime(self) -> None:
+        runtime_root = resolve_runtime_root().replace("\\", "/")
+
+        self.assertTrue(runtime_root.endswith("/.openaihub/npm-runtime"))
+
     def test_resolve_platform_config_supports_macos_arm64(self) -> None:
         result = resolve_platform_config("darwin", "arm64")
 
@@ -52,3 +70,13 @@ class NpmPlatformConfigTests(unittest.TestCase):
         )
 
         self.assertIn("linux-x64", output)
+
+    def test_windows_uninstall_script_preserves_user_openaihub_directory(self) -> None:
+        script = (ROOT_DIR / "scripts" / "uninstall.ps1").read_text(encoding="utf-8")
+
+        self.assertNotIn("Remove-Item -Path $using:InstallRoot -Recurse -Force", script)
+
+    def test_unix_uninstall_script_preserves_user_openaihub_directory(self) -> None:
+        script = (ROOT_DIR / "scripts" / "uninstall.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn('rm -rf "$INSTALL_ROOT"', script)
