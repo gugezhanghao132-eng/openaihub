@@ -53,8 +53,8 @@ OAH
 
 命令入口默认目录：
 
-- Windows：`%USERPROFILE%/.openaihub/bin`
-- macOS：`$HOME/.openaihub/bin`
+- Windows：通常是 `%APPDATA%/npm`
+- macOS：通常是 `/usr/local/bin` 或 `/opt/homebrew/bin`
 
 ## 为什么要用 OpenAI Hub
 
@@ -232,7 +232,7 @@ macOS 用户同样按这个默认目录检测：
 
 ## 当前状态
 
-- npm 包将发布：`openaihub@1.1.16`
+- npm 包已发布：`openaihub@1.1.16`
 - npm 安装命令已可直接使用
 - 已验证命令：`openaihub`、`OAH`、`openaihub --version`
 - npm 安装链按平台拉取 Windows / macOS 对应运行时

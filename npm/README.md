@@ -11,7 +11,7 @@ Current support: Windows x64, macOS arm64, macOS x64.
 Runtime location after install:
 
 ```text
-<global npm package>/openaihub/npm/.runtime
+<global npm package>/openaihub/.runtime
 ```
 
 Then run:
