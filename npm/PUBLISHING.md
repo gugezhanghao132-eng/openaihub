@@ -3,9 +3,9 @@
 ## Local verification
 
 ```bash
-cd 1.1/npm
+cd npm
 npm pack
-npm install -g ./openaihub-1.1.9.tgz
+npm install -g ./openaihub-1.1.10.tgz
 openaihub --version
 OAH --version
 ```
@@ -13,7 +13,7 @@ OAH --version
 ## Publish
 
 ```bash
-cd 1.1/npm
+cd npm
 npm login
 npm publish --access public
 ```
@@ -23,7 +23,7 @@ npm publish --access public
 Prepared workflow:
 
 ```text
-1.1/.github/workflows/publish-npm.yml
+.github/workflows/publish-npm.yml
 ```
 
 If you configure npm Trusted Publisher for:
