@@ -8,10 +8,7 @@ show_step() {
   printf '[%s] %s\n' "$1" "$2"
 }
 
-show_step '1/2' 'Removing installed files...'
-rm -rf "$INSTALL_ROOT"
-
-show_step '2/2' 'Cleaning shell PATH entries...'
+show_step '1/1' 'Cleaning shell PATH entries...'
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
   if [ -f "$rc" ]; then
     tmp="$rc.tmp.openaihub"
@@ -21,4 +18,5 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
 done
 
 echo "OpenAI Hub uninstall complete."
-echo "Removed path: $INSTALL_ROOT"
+echo "User data preserved at: $INSTALL_ROOT"
+echo "Delete that folder manually if you want to remove saved accounts and config."

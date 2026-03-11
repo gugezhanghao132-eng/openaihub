@@ -41,14 +41,54 @@ except ImportError:
     tty = None
 
 
-ROOT = Path.home() / ".openclaw"
-AGENTS_ROOT = ROOT / "agents"
+ROOT = Path.home() / ".openaihub"
+OPENCLAW_ROOT = Path.home() / ".openclaw"
+AGENTS_ROOT = OPENCLAW_ROOT / "agents"
 STORE_FILE = ROOT / "openai-codex-accounts.json"
 APP_STATE_FILE = ROOT / "openai-hub-state.json"
-OPENCODE_CONFIG_ROOT = Path.home() / ".config" / "opencode"
+
+
+def default_opencode_config_root() -> Path:
+    config_override = str(os.environ.get("OPENCODE_CONFIG") or "").strip()
+    if config_override:
+        return Path(config_override).expanduser().resolve().parent
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    ).expanduser()
+    return config_home / "opencode"
+
+
+def default_opencode_auth_candidates() -> list[Path]:
+    data_home = Path(
+        os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    ).expanduser()
+    candidates = [data_home / "opencode" / "auth.json"]
+    if sys.platform == "darwin":
+        candidates.append(
+            Path.home() / "Library" / "Application Support" / "opencode" / "auth.json"
+        )
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_key = str(candidate)
+        if candidate_key not in seen:
+            deduped.append(candidate)
+            seen.add(candidate_key)
+    return deduped
+
+
+def resolve_opencode_auth_file() -> Path:
+    candidates = default_opencode_auth_candidates()
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+OPENCODE_CONFIG_ROOT = default_opencode_config_root()
 OPENCODE_CONFIG_FILE = OPENCODE_CONFIG_ROOT / "opencode.json"
-OPENCODE_STATE_ROOT = Path.home() / ".local" / "share" / "opencode"
-OPENCODE_AUTH_FILE = OPENCODE_STATE_ROOT / "auth.json"
+OPENCODE_AUTH_FILE = resolve_opencode_auth_file()
+OPENCODE_STATE_ROOT = OPENCODE_AUTH_FILE.parent
 AUDIT_LOG_DIR = ROOT / "logs"
 SWITCH_AUDIT_LOG_FILE = AUDIT_LOG_DIR / "switch-events.jsonl"
 PROFILE_KEY = "openai-codex:default"
@@ -413,6 +453,35 @@ def build_main_menu_options() -> list[JsonDict]:
     ]
 
 
+def choose_runtime_variant() -> str:
+    selected = choose_from_menu(
+        title="请选择启动模式",
+        options=[
+            {
+                "key": "full",
+                "label": "综合模式",
+                "description": "检查 OpenClAW + OpenCode，切号时两边一起切",
+            },
+            {
+                "key": "opencode",
+                "label": "OpenCode 模式",
+                "description": "检查 OpenCode，登录可走内置链路，切号时只改 OpenCode",
+            },
+            {
+                "key": "openclaw",
+                "label": "OpenClAW 模式",
+                "description": "只检查 OpenClAW，切号时只改 OpenClAW",
+            },
+        ],
+        hint="先选择运行模式，再进入初始化与主菜单；Esc 可直接退出",
+        panel_header_status="1.1 启动器",
+        panel_footer_status="模式不同，检查范围和切号范围也不同",
+    )
+    if not selected:
+        raise KeyboardInterrupt
+    return str(selected.get("key") or "full")
+
+
 def render_dashboard_text(
     rows: list[JsonDict], current_alias: str, include_header: bool = True
 ) -> str:
@@ -445,8 +514,9 @@ def render_dashboard_text(
         last_synced_at = format_dashboard_last_synced_at(row.get("_lastRefreshedAtMs"))
         sync_issue_suffix = format_dashboard_sync_issue_suffix(row)
         lines.append(
-            f"{marker} {colored_name} [dim]·[/dim] [dim]账号ID[/dim] {account_id} [dim]·[/dim] [dim]上次同步[/dim] {last_synced_at}{sync_issue_suffix}"
+            f"{marker} {colored_name} [dim]·[/dim] [dim]账号ID[/dim] {account_id}"
         )
+        lines.append(f"  [dim]上次同步[/dim] {last_synced_at}{sync_issue_suffix}")
         windows = row.get("windows") or []
         if not windows:
             lines.append("  [dim]暂无额度数据[/dim]")
@@ -1150,6 +1220,19 @@ def build_section_header_line(
     return f"{left_markup}{' ' * gap}{right_status}"
 
 
+def get_home_mode_label() -> str:
+    variant = get_app_variant()
+    if variant == "opencode":
+        return "OpenCode 模式"
+    if variant == "openclaw":
+        return "OpenClAW 模式"
+    return "综合模式"
+
+
+def build_home_mode_badge() -> str:
+    return f"[bold black on cyan] {get_home_mode_label()} [/]"
+
+
 def compose_panel_body(
     content: str, title_status: str | None = None, footer_status: str | None = None
 ) -> str:
@@ -1303,7 +1386,7 @@ def render_home_dashboard_text(
     picked_rows = pick_homepage_rows(rows, max_slots=max_slots)
     summary = summarize_dashboard_rows(rows)
     capacity = summarize_dashboard_capacity(rows)
-    header_divider = f"[dim]{'═' * 72}[/dim]"
+    header_divider = f"[dim]{'═' * PANEL_CONTENT_WIDTH}[/dim]"
     capacity_bar = colorize_progress_bar(
         progress_bar(100.0 - float(capacity["remainingPercent"]), width=32),
         str(capacity["style"]),
@@ -1314,7 +1397,11 @@ def render_home_dashboard_text(
         f" [dim]·[/dim] [red]不可用 {summary['unavailable']}[/red]"
     )
     lines = [
-        f"[bold cyan]{HOME_PANEL_TITLE}[/bold cyan]",
+        build_section_header_line(
+            HOME_PANEL_TITLE,
+            build_home_mode_badge(),
+            width_hint=PANEL_CONTENT_WIDTH,
+        ),
         header_divider,
         summary_line,
         (
@@ -1687,6 +1774,7 @@ def switch_audit_log_file(root: Path = ROOT) -> Path:
 
 
 def write_switch_audit_event(event: JsonDict, root: Path = ROOT) -> None:
+    migrate_legacy_app_state_files_if_needed(root)
     payload = {"timestamp": now_iso(), **event}
     try:
         append_jsonl(switch_audit_log_file(root), payload)
@@ -1709,6 +1797,7 @@ def format_switch_audit_entry(entry: JsonDict) -> str:
 
 
 def cmd_logs(limit: int = 20, root: Path = ROOT) -> int:
+    migrate_legacy_app_state_files_if_needed(root)
     log_path = switch_audit_log_file(root)
     if not log_path.exists():
         print("还没有切号日志。")
@@ -1774,7 +1863,7 @@ def run_action_with_status(
 
 
 def root_agents_dir(root: Path) -> Path:
-    return root / "agents"
+    return resolve_openclaw_root(root) / "agents"
 
 
 def root_store_file(root: Path) -> Path:
@@ -1782,11 +1871,162 @@ def root_store_file(root: Path) -> Path:
 
 
 def root_openclaw_config_file(root: Path) -> Path:
-    return root / "openclaw.json"
+    return resolve_openclaw_root(root) / "openclaw.json"
+
+
+def root_app_state_file(root: Path = ROOT) -> Path:
+    return root / APP_STATE_FILE.name
 
 
 def login_session_file(root: Path = ROOT) -> Path:
+    migrate_legacy_app_state_files_if_needed(root)
     return root / "openai-codex-login-session.json"
+
+
+def resolve_openclaw_root(root: Path = ROOT) -> Path:
+    state_root_override = str(os.environ.get("OPENCLAW_STATE_DIR") or "").strip()
+    if state_root_override:
+        return Path(state_root_override).expanduser()
+    candidate = Path(root)
+    if candidate == ROOT:
+        return OPENCLAW_ROOT
+    if candidate == OPENCLAW_ROOT:
+        return OPENCLAW_ROOT
+    for marker in ("agents", "openclaw.json", "workspace"):
+        if (candidate / marker).exists():
+            return candidate
+    return OPENCLAW_ROOT
+
+
+def legacy_app_root(root: Path = ROOT) -> Path | None:
+    candidate = Path(root)
+    resolved_openclaw_root = resolve_openclaw_root(candidate)
+    if candidate == resolved_openclaw_root:
+        return None
+    return resolved_openclaw_root
+
+
+def root_login_session_file(root: Path = ROOT) -> Path:
+    return root / "openai-codex-login-session.json"
+
+
+def has_saved_accounts(data: JsonDict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    accounts = data.get("accounts")
+    return isinstance(accounts, dict) and bool(accounts)
+
+
+def dashboard_snapshot_row_count(data: JsonDict | None) -> int:
+    if not isinstance(data, dict):
+        return 0
+    snapshot = data.get("dashboardSnapshot")
+    if not isinstance(snapshot, dict):
+        return 0
+    rows_by_alias = snapshot.get("rowsByAlias")
+    if not isinstance(rows_by_alias, dict):
+        return 0
+    return len(rows_by_alias)
+
+
+def read_json_if_exists(path: Path) -> JsonDict | None:
+    if not path.exists():
+        return None
+    try:
+        data = read_json(path)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def migrate_legacy_json_file_if_needed(
+    target_path: Path,
+    legacy_path: Path,
+    should_copy: Callable[[JsonDict | None, JsonDict | None], bool],
+) -> bool:
+    if target_path == legacy_path or not legacy_path.exists():
+        return False
+    target_data = read_json_if_exists(target_path)
+    legacy_data = read_json_if_exists(legacy_path)
+    if not should_copy(target_data, legacy_data):
+        return False
+    try:
+        write_bytes_atomic(target_path, legacy_path.read_bytes())
+    except OSError:
+        return False
+    return True
+
+
+def migrate_legacy_login_session_if_needed(root: Path = ROOT) -> bool:
+    legacy_root_path = legacy_app_root(root)
+    if legacy_root_path is None:
+        return False
+    target_path = root_login_session_file(root)
+    legacy_path = root_login_session_file(legacy_root_path)
+    if target_path == legacy_path or not legacy_path.exists():
+        return False
+    target_data = read_json_if_exists(target_path)
+    legacy_data = read_json_if_exists(legacy_path)
+    if isinstance(target_data, dict) and target_data:
+        return False
+    if not (isinstance(legacy_data, dict) and legacy_data):
+        return False
+    try:
+        write_bytes_atomic(target_path, legacy_path.read_bytes())
+    except OSError:
+        return False
+    return True
+
+
+def migrate_legacy_switch_log_if_needed(root: Path = ROOT) -> bool:
+    legacy_root_path = legacy_app_root(root)
+    if legacy_root_path is None:
+        return False
+    target_path = switch_audit_log_file(root)
+    legacy_path = switch_audit_log_file(legacy_root_path)
+    if target_path == legacy_path or not legacy_path.exists():
+        return False
+    if target_path.exists() and target_path.stat().st_size > 0:
+        return False
+    try:
+        write_bytes_atomic(target_path, legacy_path.read_bytes())
+    except OSError:
+        return False
+    return True
+
+
+def migrate_legacy_app_state_files_if_needed(root: Path = ROOT) -> dict[str, bool]:
+    legacy_root_path = legacy_app_root(root)
+    if legacy_root_path is None:
+        return {
+            "store": False,
+            "appState": False,
+            "loginSession": False,
+            "switchLog": False,
+        }
+    store_migrated = migrate_legacy_json_file_if_needed(
+        root_store_file(root),
+        root_store_file(legacy_root_path),
+        lambda target, legacy: has_saved_accounts(legacy)
+        and not has_saved_accounts(target),
+    )
+    app_state_migrated = migrate_legacy_json_file_if_needed(
+        root_app_state_file(root),
+        root_app_state_file(legacy_root_path),
+        lambda target, legacy: (
+            dashboard_snapshot_row_count(legacy) > 0
+            and dashboard_snapshot_row_count(target) == 0
+        )
+        or (target is None and isinstance(legacy, dict) and bool(legacy)),
+    )
+    login_session_migrated = migrate_legacy_login_session_if_needed(root)
+    switch_log_migrated = migrate_legacy_switch_log_if_needed(root)
+    return {
+        "store": store_migrated,
+        "appState": app_state_migrated,
+        "loginSession": login_session_migrated,
+        "switchLog": switch_log_migrated,
+    }
 
 
 def agent_dirs(root: Path = ROOT) -> list[Path]:
@@ -1799,6 +2039,10 @@ def agent_dirs(root: Path = ROOT) -> list[Path]:
         if p.is_dir():
             out.append(p)
     return out
+
+
+def agent_sessions_file(adir: Path) -> Path:
+    return adir.parent / "sessions" / "sessions.json"
 
 
 def extract_current_profile(root: Path = ROOT) -> JsonDict:
@@ -1837,12 +2081,22 @@ def extract_current_profile(root: Path = ROOT) -> JsonDict:
             }
 
     raise ValueError(
-        "No current openai-codex oauth token found under ~/.openclaw/agents/*/agent"
+        f"No current openai-codex oauth token found under {resolve_openclaw_root(root) / 'agents'}/*/agent"
     )
 
 
 def load_store(root: Path = ROOT) -> JsonDict:
+    migrate_legacy_app_state_files_if_needed(root)
     data = read_json(root_store_file(root))
+    if not has_saved_accounts(data):
+        legacy_root_path = legacy_app_root(root)
+        legacy_data = (
+            read_json_if_exists(root_store_file(legacy_root_path))
+            if legacy_root_path is not None
+            else None
+        )
+        if has_saved_accounts(legacy_data):
+            data = legacy_data
     if not data:
         data = {"version": 1, "active": None, "accounts": {}, "updatedAt": now_iso()}
     if "accounts" not in data or not isinstance(data["accounts"], dict):
@@ -1879,7 +2133,7 @@ def ensure_openclaw_model_aliases(config: JsonDict) -> bool:
 def ensure_openclaw_workspace_defaults(config: JsonDict, root: Path) -> bool:
     agents = config.setdefault("agents", {})
     defaults = agents.setdefault("defaults", {})
-    target_workspace = str(root / "workspace")
+    target_workspace = str(resolve_openclaw_root(root) / "workspace")
     if str(defaults.get("workspace") or "") == target_workspace:
         return False
     defaults["workspace"] = target_workspace
@@ -1896,15 +2150,24 @@ def ensure_openclaw_auth_profile_defaults(config: JsonDict) -> bool:
 
 
 def load_app_state(root: Path = ROOT) -> JsonDict:
-    data = read_json(APP_STATE_FILE if root == ROOT else root / APP_STATE_FILE.name)
+    migrate_legacy_app_state_files_if_needed(root)
+    data = read_json(root_app_state_file(root))
+    if dashboard_snapshot_row_count(data) == 0:
+        legacy_root_path = legacy_app_root(root)
+        legacy_data = (
+            read_json_if_exists(root_app_state_file(legacy_root_path))
+            if legacy_root_path is not None
+            else None
+        )
+        if dashboard_snapshot_row_count(legacy_data) > 0:
+            data = legacy_data
     if not isinstance(data, dict):
         data = {}
     return data
 
 
 def save_app_state(data: JsonDict, root: Path = ROOT) -> None:
-    target = APP_STATE_FILE if root == ROOT else root / APP_STATE_FILE.name
-    write_json(target, data)
+    write_json(root_app_state_file(root), data)
 
 
 def load_dashboard_snapshot_rows(root: Path = ROOT) -> list[JsonDict]:
@@ -1990,7 +2253,8 @@ def cleanup_openclaw_meta(config: JsonDict, root: Path = ROOT) -> bool:
 
 
 def ensure_default_agent_dirs(root: Path = ROOT) -> list[Path]:
-    agents_root = root_agents_dir(root)
+    openclaw_root = resolve_openclaw_root(root)
+    agents_root = root_agents_dir(openclaw_root)
     created: list[Path] = []
     default_aliases = ["main", "product", "ad-ops"]
     for alias in default_aliases:
@@ -2009,7 +2273,7 @@ def ensure_default_agent_dirs(root: Path = ROOT) -> list[Path]:
         if not models_path.exists():
             write_json(models_path, {})
         created.append(agent_root)
-    (root / "workspace").mkdir(parents=True, exist_ok=True)
+    (openclaw_root / "workspace").mkdir(parents=True, exist_ok=True)
     return created
 
 
@@ -2022,13 +2286,13 @@ def build_init_failure_detail(reason: str, target_path: Path | None = None) -> s
     if reason == "openclaw-switch-target-unavailable":
         return f"OpenClAW 切换目标文件当前不可用，程序无法确认后续切号能成功写入。{path_text}\n请检查该目录/文件是否可读、可写、未被占用，并确认防病毒或同步盘没有锁住这些文件。"
     if reason == "openclaw-root-missing":
-        return f"找不到 OpenClAW 根目录。{path_text}\n建议目录：{ROOT}\n请先确认 OpenClAW 已安装，并且相关目录已经出现在上面的路径后，再重新检测。"
+        return f"找不到 OpenClAW 根目录。{path_text}\n建议目录：{OPENCLAW_ROOT}\n请先确认 OpenClAW 已安装，并且相关目录已经出现在上面的路径后，再重新检测。"
     if reason == "openclaw-config-missing":
-        return f"找不到 OpenClAW 配置文件。{path_text}\n建议目录：{root_openclaw_config_file(ROOT)}\n请先确认 OpenClAW 已安装或目录已准备好，然后重新启动程序。"
+        return f"找不到 OpenClAW 配置文件。{path_text}\n建议目录：{root_openclaw_config_file(OPENCLAW_ROOT)}\n请先确认 OpenClAW 已安装或目录已准备好，然后重新启动程序。"
     if reason == "openclaw-model-missing":
         return f"OpenClAW 配置里缺少 {TARGET_OPENCLAW_MODEL_ID}。{path_text}\n请重新运行初始化；如果仍失败，检查配置文件是否只读。"
     if reason == "openclaw-agents-missing":
-        return f"找不到 OpenClAW agent 目录。{path_text}\n建议目录：{root_agents_dir(ROOT)}\n请先确认 OpenClAW 已正确初始化 agent 目录，然后重新启动程序。"
+        return f"找不到 OpenClAW agent 目录。{path_text}\n建议目录：{root_agents_dir(OPENCLAW_ROOT)}\n请先确认 OpenClAW 已正确初始化 agent 目录，然后重新启动程序。"
     if reason == "openclaw-agent-model-missing":
         return f"OpenClAW agent 模型文件里缺少 {TARGET_OPENCLAW_MODEL_ID}。{path_text}\n请重新运行初始化；如果仍失败，检查该文件写入权限。"
     if reason == "opencode-config-missing":
@@ -2074,9 +2338,6 @@ def detect_init_hard_failure(
         if not agents_root.exists() or not agents_root.is_dir():
             return build_init_failure("openclaw-agents-missing", agents_root)
     if variant_requires_opencode_config():
-        config_dir = opencode_config_path.parent
-        if not config_dir.exists() or not config_dir.is_dir():
-            return build_init_failure("opencode-config-dir-missing", config_dir)
         state_dir = opencode_auth_path.parent
         if not state_dir.exists() or not state_dir.is_dir():
             return build_init_failure("opencode-state-dir-missing", state_dir)
@@ -2106,6 +2367,20 @@ def read_json_object_strict(path: Path) -> JsonDict:
     if not isinstance(data, dict):
         raise ValueError("文件内容不是 JSON 对象")
     return data
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.openaihub-{ts()}-{os.getpid()}.tmp"
+    try:
+        with tmp_path.open("wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def probe_json_target_writable(path: Path) -> None:
@@ -2145,6 +2420,8 @@ def build_init_probe_profile() -> JsonDict:
 def probe_openclaw_agent_switch_target(adir: Path) -> None:
     auth_path = adir / "auth.json"
     profiles_path = adir / "auth-profiles.json"
+    original_auth_bytes = auth_path.read_bytes()
+    original_profiles_bytes = profiles_path.read_bytes()
     original_auth = read_json_object_strict(auth_path)
     original_profiles = read_json_object_strict(profiles_path)
     probe_profile = build_init_probe_profile()
@@ -2201,16 +2478,17 @@ def probe_openclaw_agent_switch_target(adir: Path) -> None:
         ):
             raise ValueError("OpenClAW auth-profiles.json 测试写入回读失败")
     finally:
-        write_json(auth_path, original_auth)
-        write_json(profiles_path, original_profiles)
+        write_bytes_atomic(auth_path, original_auth_bytes)
+        write_bytes_atomic(profiles_path, original_profiles_bytes)
 
-    if read_json_object_strict(auth_path) != original_auth:
+    if auth_path.read_bytes() != original_auth_bytes:
         raise ValueError("OpenClAW auth.json 恢复失败")
-    if read_json_object_strict(profiles_path) != original_profiles:
+    if profiles_path.read_bytes() != original_profiles_bytes:
         raise ValueError("OpenClAW auth-profiles.json 恢复失败")
 
 
 def probe_opencode_switch_target(auth_path: Path) -> None:
+    original_auth_bytes = auth_path.read_bytes()
     original_auth = read_json_object_strict(auth_path)
     probe_profile = build_init_probe_profile()
 
@@ -2235,9 +2513,9 @@ def probe_opencode_switch_target(auth_path: Path) -> None:
         ):
             raise ValueError("OpenCode auth.json 测试写入回读失败")
     finally:
-        write_json(auth_path, original_auth)
+        write_bytes_atomic(auth_path, original_auth_bytes)
 
-    if read_json_object_strict(auth_path) != original_auth:
+    if auth_path.read_bytes() != original_auth_bytes:
         raise ValueError("OpenCode auth.json 恢复失败")
 
 
@@ -2340,55 +2618,9 @@ def verify_initialized_environment(
         return hard_failure
     model_files: list[Path] = []
     if variant_requires_local_openclaw_install():
-        openclaw_config = read_json(resolved_openclaw_config_path)
-        if not resolved_openclaw_config_path.exists():
-            return build_init_failure(
-                "openclaw-config-missing", resolved_openclaw_config_path
-            )
-
         model_files = detect_openclaw_agent_model_files(root)
-        if not model_files:
-            return build_init_failure("openclaw-agents-missing", root_agents_dir(root))
-
-        provider_models = (
-            openclaw_config.get("models", {})
-            .get("providers", {})
-            .get(PROVIDER_KEY, {})
-            .get("models", [])
-        )
-        if not any(
-            str(item.get("id") or "") == TARGET_OPENCLAW_MODEL_ID
-            for item in provider_models
-            if isinstance(item, dict)
-        ):
-            return build_init_failure(
-                "openclaw-model-missing", resolved_openclaw_config_path
-            )
-
-        for models_path in model_files:
-            model_config = read_json(models_path)
-            agent_models = (
-                model_config.get("providers", {})
-                .get(PROVIDER_KEY, {})
-                .get("models", [])
-            )
-            if not any(
-                str(item.get("id") or "") == TARGET_OPENCLAW_MODEL_ID
-                for item in agent_models
-                if isinstance(item, dict)
-            ):
-                return build_init_failure("openclaw-agent-model-missing", models_path)
 
     if variant_requires_opencode_config():
-        opencode_config = read_json(opencode_config_path)
-        if not opencode_config_path.exists():
-            return build_init_failure("opencode-config-missing", opencode_config_path)
-        opencode_models = (
-            opencode_config.get("provider", {}).get("openai", {}).get("models", {})
-        )
-        if not isinstance(opencode_models.get(TARGET_OPENCODE_MODEL_KEY), dict):
-            return build_init_failure("opencode-model-missing", opencode_config_path)
-
         if not opencode_auth_path.exists():
             return build_init_failure("opencode-auth-missing", opencode_auth_path)
 
@@ -2591,24 +2823,19 @@ def initialize_environment(
         ensure_store_file(root)
     if variant_requires_local_openclaw_install():
         if progress_callback is not None:
-            progress_callback("步骤 2/5 检查 OpenClAW 配置")
-        resolved_openclaw_config_path = ensure_openclaw_config(
-            root, openclaw_config_path
-        )
+            progress_callback("步骤 2/5 检查 OpenClAW 认证状态")
+        resolved_openclaw_config_path = resolved_openclaw_config_path
         if progress_callback is not None:
-            progress_callback("步骤 3/5 检查 agent 模型")
-        agent_model_files = [
-            ensure_agent_models_file(path)
-            for path in detect_openclaw_agent_model_files(root)
-        ]
+            progress_callback("步骤 3/5 检查 OpenClAW agent 目标")
+        agent_model_files = detect_openclaw_agent_model_files(root)
 
     resolved_opencode_config_path = opencode_config_path
     resolved_opencode_auth_path = opencode_auth_path
     if variant_requires_opencode_config():
         if progress_callback is not None:
-            progress_callback("步骤 4/5 检查 OpenCode 配置")
-        resolved_opencode_config_path = ensure_opencode_config(opencode_config_path)
-        resolved_opencode_auth_path = ensure_opencode_auth_file(opencode_auth_path)
+            progress_callback("步骤 4/5 检查 OpenCode 认证状态")
+        resolved_opencode_config_path = opencode_config_path
+        resolved_opencode_auth_path = opencode_auth_path
     if progress_callback is not None:
         progress_callback("步骤 5/5 验证初始化结果")
     verification = verify_initialized_environment(
@@ -3110,8 +3337,67 @@ def build_openclaw_command_with_entrypoint(
     ]
 
 
+def build_openclaw_gateway_restart_command_with_entrypoint(
+    node_command: str, entrypoint: Path
+) -> list[str]:
+    return [node_command, str(entrypoint), "gateway", "restart"]
+
+
 def build_official_login_command(executable: str = "openclaw") -> list[str]:
     return [executable, "models", "auth", "login", "--provider", "openai-codex"]
+
+
+def build_official_gateway_restart_command(executable: str = "openclaw") -> list[str]:
+    return [executable, "gateway", "restart"]
+
+
+def build_official_gateway_stop_command(executable: str = "openclaw") -> list[str]:
+    return [executable, "gateway", "stop"]
+
+
+def resolve_openclaw_program_command(appdata: str | None = None) -> str | None:
+    installed = shutil.which("openclaw")
+    if installed:
+        return installed
+    resolved_appdata = appdata if appdata is not None else os.environ.get("APPDATA", "")
+    if resolved_appdata:
+        npm_cmd = Path(resolved_appdata) / "npm" / "openclaw.cmd"
+        if npm_cmd.exists():
+            return str(npm_cmd)
+    return None
+
+
+def resolve_openclaw_gateway_launcher_path(root: Path = ROOT) -> Path | None:
+    candidate = resolve_openclaw_root(root) / "gateway.cmd"
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def resolve_openclaw_restart_helper_script() -> Path | None:
+    candidate = SCRIPT_DIR / "openclaw_restart_gateway.ps1"
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def resolve_openclaw_restart_helper_script_posix() -> Path | None:
+    candidate = SCRIPT_DIR / "openclaw_restart_gateway.sh"
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def build_windows_openclaw_window_cleanup_script(gateway_launcher_path: Path) -> str:
+    normalized = str(gateway_launcher_path).replace("'", "''")
+    return (
+        "$launcher = '" + normalized + "'; "
+        "$targets = Get-CimInstance Win32_Process | Where-Object { "
+        + "($_.Name -ieq 'cmd.exe' -and $_.CommandLine -like ('*' + $launcher + '*')) "
+        + "-or ($_.Name -ieq 'node.exe' -and $_.CommandLine -like '*node_modules\\openclaw\\dist\\index.js gateway*') "
+        + "}; "
+        + "foreach($p in $targets){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
+    )
 
 
 def is_openclaw_program_installed(executable: str = "openclaw") -> bool:
@@ -3123,8 +3409,9 @@ def is_opencode_program_installed(executable: str = "opencode") -> bool:
 
 
 def resolve_official_login_command(appdata: str | None = None) -> list[str]:
-    if is_openclaw_program_installed():
-        return build_official_login_command()
+    program_command = resolve_openclaw_program_command(appdata)
+    if program_command is not None:
+        return build_official_login_command(program_command)
     bundled_openclaw_entry = resolve_bundled_openclaw_entry()
     if bundled_openclaw_entry is not None:
         return build_openclaw_command_with_entrypoint(
@@ -3143,6 +3430,181 @@ def resolve_official_login_command(appdata: str | None = None) -> list[str]:
             )
             return build_openclaw_command_with_entrypoint(node_command, entrypoint)
     return build_official_login_command()
+
+
+def resolve_openclaw_gateway_restart_command(
+    appdata: str | None = None,
+) -> list[str] | None:
+    program_command = resolve_openclaw_program_command(appdata)
+    if program_command is not None:
+        return build_official_gateway_restart_command(program_command)
+    bundled_openclaw_entry = resolve_bundled_openclaw_entry()
+    if bundled_openclaw_entry is not None:
+        return build_openclaw_gateway_restart_command_with_entrypoint(
+            resolve_node_command(), bundled_openclaw_entry
+        )
+    resolved_appdata = appdata if appdata is not None else os.environ.get("APPDATA", "")
+    if resolved_appdata:
+        npm_root = Path(resolved_appdata) / "npm"
+        entrypoint = npm_root / "node_modules" / "openclaw" / "openclaw.mjs"
+        if entrypoint.exists():
+            node_executable = npm_root / "node.exe"
+            node_command = (
+                str(node_executable)
+                if node_executable.exists()
+                else resolve_node_command()
+            )
+            return build_openclaw_gateway_restart_command_with_entrypoint(
+                node_command, entrypoint
+            )
+    return None
+
+
+def resolve_openclaw_gateway_stop_command(
+    appdata: str | None = None,
+) -> list[str] | None:
+    program_command = resolve_openclaw_program_command(appdata)
+    if program_command is not None:
+        return build_official_gateway_stop_command(program_command)
+    bundled_openclaw_entry = resolve_bundled_openclaw_entry()
+    if bundled_openclaw_entry is not None:
+        return [resolve_node_command(), str(bundled_openclaw_entry), "gateway", "stop"]
+    resolved_appdata = appdata if appdata is not None else os.environ.get("APPDATA", "")
+    if resolved_appdata:
+        npm_root = Path(resolved_appdata) / "npm"
+        entrypoint = npm_root / "node_modules" / "openclaw" / "openclaw.mjs"
+        if entrypoint.exists():
+            node_executable = npm_root / "node.exe"
+            node_command = (
+                str(node_executable)
+                if node_executable.exists()
+                else resolve_node_command()
+            )
+            return [node_command, str(entrypoint), "gateway", "stop"]
+    return None
+
+
+def restart_openclaw_runtime_after_switch(
+    subprocess_run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    subprocess_popen: Callable[..., Any] = subprocess.Popen,
+    platform_name: str | None = None,
+    gateway_launcher_path: Path | None = None,
+    gateway_stop_command: list[str] | None = None,
+) -> JsonDict:
+    current_platform = platform_name or os.name
+    if current_platform == "nt":
+        helper_script = resolve_openclaw_restart_helper_script()
+        program_command = resolve_openclaw_program_command()
+        if helper_script is not None and program_command is not None:
+            command = [
+                "cmd",
+                "/c",
+                "start",
+                "",
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(helper_script),
+                "-OpenClawCmd",
+                program_command,
+            ]
+            launcher_path = (
+                gateway_launcher_path or resolve_openclaw_gateway_launcher_path()
+            )
+            if launcher_path is not None:
+                command.extend(["-GatewayLauncher", str(launcher_path)])
+            try:
+                process = subprocess_popen(
+                    command,
+                    close_fds=True,
+                )
+            except OSError as exc:
+                return {
+                    "attempted": True,
+                    "ok": False,
+                    "reason": "spawn-failed",
+                    "mode": "visible-stop-start-script",
+                    "command": command,
+                    "error": str(exc),
+                }
+            return {
+                "attempted": True,
+                "ok": True,
+                "mode": "visible-stop-start-script",
+                "command": command,
+                "pid": getattr(process, "pid", None),
+            }
+    helper_script_posix = resolve_openclaw_restart_helper_script_posix()
+    program_command = resolve_openclaw_program_command()
+    if current_platform != "nt" and helper_script_posix is not None and program_command:
+        command = ["sh", str(helper_script_posix), program_command]
+        try:
+            process = subprocess_popen(
+                command,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return {
+                "attempted": True,
+                "ok": False,
+                "reason": "spawn-failed",
+                "mode": "posix-stop-start-script",
+                "command": command,
+                "error": str(exc),
+            }
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "posix-stop-start-script",
+            "command": command,
+            "pid": getattr(process, "pid", None),
+        }
+    command = resolve_openclaw_gateway_restart_command()
+    if not command:
+        return {
+            "attempted": False,
+            "ok": False,
+            "reason": "command-unavailable",
+        }
+    try:
+        result = subprocess_run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "reason": "timeout",
+            "command": command,
+            "error": str(exc),
+        }
+    except OSError as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "reason": "spawn-failed",
+            "command": command,
+            "error": str(exc),
+        }
+    stdout = str(result.stdout or "").strip()
+    stderr = str(result.stderr or "").strip()
+    return {
+        "attempted": True,
+        "ok": result.returncode == 0,
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
 
 
 def strip_ansi_codes(text: str) -> str:
@@ -4266,6 +4728,24 @@ def start_dashboard_refresh_worker(
     state.pending_refresh_thread.start()
 
 
+def start_initial_dashboard_full_refresh(
+    state: DashboardState, root: Path = ROOT
+) -> None:
+    start_dashboard_refresh_worker(
+        state,
+        root,
+        build_rows_fn=lambda target_root,
+        progress_fn=None,
+        previous_rows=None: build_dashboard_rows(
+            target_root,
+            progress_fn=progress_fn,
+            previous_rows=previous_rows,
+            force_full_refresh=True,
+        ),
+        message="Loading",
+    )
+
+
 def tick_dashboard_refresh_worker(state: DashboardState) -> bool:
     thread = state.pending_refresh_thread
     if thread is None:
@@ -4357,7 +4837,34 @@ def cmd_dashboard() -> int:
     return 0
 
 
-def render_overview_screen(rows: list[JsonDict], filter_key: str) -> str:
+def get_overview_body_viewport_height(terminal_lines: int | None = None) -> int:
+    lines = terminal_lines
+    if lines is None:
+        lines = shutil.get_terminal_size(
+            (DEFAULT_WINDOW_COLS, DEFAULT_WINDOW_LINES)
+        ).lines
+    return max(6, int(lines) - 8)
+
+
+def slice_overview_body_lines(
+    lines: list[str], scroll_offset: int, viewport_height: int
+) -> tuple[list[str], int, bool, bool]:
+    normalized_height = max(1, int(viewport_height))
+    total_lines = len(lines)
+    max_offset = max(0, total_lines - normalized_height)
+    normalized_offset = max(0, min(int(scroll_offset), max_offset))
+    visible_lines = lines[normalized_offset : normalized_offset + normalized_height]
+    has_above = normalized_offset > 0
+    has_below = normalized_offset + normalized_height < total_lines
+    return visible_lines, normalized_offset, has_above, has_below
+
+
+def build_overview_screen_state(
+    rows: list[JsonDict],
+    filter_key: str,
+    scroll_offset: int = 0,
+    body_viewport_height: int | None = None,
+) -> JsonDict:
     filter_labels = {
         "all": "全部",
         "available": "可用",
@@ -4370,16 +4877,62 @@ def render_overview_screen(rows: list[JsonDict], filter_key: str) -> str:
             tabs.append(f"[bold black on cyan] {label} [/]")
         else:
             tabs.append(f"[dim]{label}[/dim]")
-    body = render_dashboard_text(
+    body_lines = render_dashboard_text(
         filter_dashboard_rows(rows, filter_key), "账号总览", include_header=False
+    ).splitlines()
+    viewport_height = (
+        int(body_viewport_height)
+        if body_viewport_height is not None
+        else get_overview_body_viewport_height()
     )
-    return "\n".join(
-        [
-            "[bold cyan]账号总览[/bold cyan]",
-            " ".join(tabs),
-            body,
-        ]
+    reserved_hint_lines = 0
+    visible_lines: list[str] = []
+    normalized_offset = 0
+    has_above = False
+    has_below = False
+    for _ in range(3):
+        body_budget = max(1, viewport_height - reserved_hint_lines)
+        visible_lines, normalized_offset, has_above, has_below = (
+            slice_overview_body_lines(
+                body_lines,
+                scroll_offset=scroll_offset,
+                viewport_height=body_budget,
+            )
+        )
+        next_reserved_hint_lines = int(has_above) + int(has_below)
+        if next_reserved_hint_lines == reserved_hint_lines:
+            break
+        reserved_hint_lines = next_reserved_hint_lines
+    lines = [
+        "[bold cyan]账号总览[/bold cyan]",
+        " ".join(tabs),
+    ]
+    if has_above:
+        lines.append("[dim]↑ 上面还有账号[/dim]")
+    lines.extend(visible_lines)
+    if has_below:
+        lines.append("[dim]↓ 继续查看下面账号[/dim]")
+    return {
+        "text": "\n".join(lines),
+        "scrollOffset": normalized_offset,
+        "hasAbove": has_above,
+        "hasBelow": has_below,
+    }
+
+
+def render_overview_screen(
+    rows: list[JsonDict],
+    filter_key: str,
+    scroll_offset: int = 0,
+    body_viewport_height: int | None = None,
+) -> str:
+    state = build_overview_screen_state(
+        rows,
+        filter_key,
+        scroll_offset=scroll_offset,
+        body_viewport_height=body_viewport_height,
     )
+    return str(state.get("text") or "")
 
 
 def show_panel_screen(content: str, title: str) -> None:
@@ -4404,10 +4957,17 @@ def show_dashboard_overview_with_loading(
         return
     filter_order = ["all", "available", "unavailable"]
     index = 0
+    scroll_offsets = {key: 0 for key in filter_order}
 
     def render_current() -> Panel:
+        state = build_overview_screen_state(
+            rows,
+            filter_order[index],
+            scroll_offset=int(scroll_offsets.get(filter_order[index], 0)),
+        )
+        scroll_offsets[filter_order[index]] = int(state.get("scrollOffset") or 0)
         return build_loading_panel(
-            render_overview_screen(rows, filter_order[index]),
+            str(state.get("text") or ""),
             None,
             None,
         )
@@ -4424,6 +4984,18 @@ def show_dashboard_overview_with_loading(
                 continue
             if key == "right":
                 index = (index + 1) % len(filter_order)
+                live.update(render_current(), refresh=True)
+                continue
+            if key == "up":
+                scroll_offsets[filter_order[index]] = max(
+                    0, int(scroll_offsets.get(filter_order[index], 0)) - 1
+                )
+                live.update(render_current(), refresh=True)
+                continue
+            if key == "down":
+                scroll_offsets[filter_order[index]] = (
+                    int(scroll_offsets.get(filter_order[index], 0)) + 1
+                )
                 live.update(render_current(), refresh=True)
                 continue
             if key in {"escape", "backspace"}:
@@ -4482,10 +5054,19 @@ def show_dashboard_overview_in_place(
     rows = list(result["rows"] or [])
     filter_order = ["all", "available", "unavailable"]
     index = 0
+    scroll_offsets = {key: 0 for key in filter_order}
 
     def render_current() -> Panel:
+        overview_state = build_overview_screen_state(
+            rows,
+            filter_order[index],
+            scroll_offset=int(scroll_offsets.get(filter_order[index], 0)),
+        )
+        scroll_offsets[filter_order[index]] = int(
+            overview_state.get("scrollOffset") or 0
+        )
         return build_loading_panel(
-            render_overview_screen(rows, filter_order[index]),
+            str(overview_state.get("text") or ""),
             build_dashboard_panel_subtitle(state),
             build_dashboard_panel_footer_status(state),
         )
@@ -4512,6 +5093,18 @@ def show_dashboard_overview_in_place(
                 continue
             if key == "right":
                 index = (index + 1) % len(filter_order)
+                live.update(render_current(), refresh=True)
+                continue
+            if key == "up":
+                scroll_offsets[filter_order[index]] = max(
+                    0, int(scroll_offsets.get(filter_order[index], 0)) - 1
+                )
+                live.update(render_current(), refresh=True)
+                continue
+            if key == "down":
+                scroll_offsets[filter_order[index]] = (
+                    int(scroll_offsets.get(filter_order[index], 0)) + 1
+                )
                 live.update(render_current(), refresh=True)
                 continue
             if key in {"escape", "backspace"}:
@@ -4705,6 +5298,85 @@ def apply_profile_to_agent(adir: Path, profile: JsonDict) -> list[Path]:
     return backups
 
 
+def clear_agent_session_overrides(adir: Path) -> list[Path]:
+    sessions_path = agent_sessions_file(adir)
+    if not sessions_path.exists():
+        return []
+    sessions = read_json(sessions_path)
+    if not sessions:
+        return []
+    changed = False
+    for session in sessions.values():
+        if not isinstance(session, dict):
+            continue
+        for key in (
+            "providerOverride",
+            "modelOverride",
+            "authProfileOverride",
+            "authProfileOverrideSource",
+            "authProfileOverrideCompactionCount",
+        ):
+            if key in session:
+                session.pop(key, None)
+                changed = True
+    if not changed:
+        return []
+    backup_paths = [backup(sessions_path)]
+    write_json(sessions_path, sessions)
+    return backup_paths
+
+
+def sync_dashboard_snapshot_after_switch(
+    root: Path, from_alias: str | None, to_alias: str, profile: JsonDict
+) -> None:
+    rows = load_dashboard_snapshot_rows(root)
+    if not rows:
+        return
+    normalized_profile = normalize_saved_profile(profile)
+    target_row: JsonDict | None = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        alias = str(row.get("alias") or "")
+        row["isCurrent"] = alias == to_alias
+        if alias != to_alias:
+            continue
+        row["displayName"] = get_account_display_name(to_alias, profile)
+        row["accountId"] = normalized_profile["accountId"] or "未知"
+        row["error"] = None
+        row["warning"] = None
+        for key in (
+            "_authIssueStatus",
+            "_authIssueCount",
+            "_authIssueFirstAtMs",
+            "_authBlockedUntilMs",
+            "_authBlockedRefresh",
+        ):
+            row.pop(key, None)
+        target_row = row
+    if target_row is None:
+        rows.append(
+            {
+                "alias": to_alias,
+                "displayName": get_account_display_name(to_alias, profile),
+                "accountId": normalized_profile["accountId"] or "未知",
+                "isCurrent": True,
+                "plan": "未知",
+                "windows": [],
+                "groups": [],
+                "error": None,
+                "warning": None,
+                "_lastRefreshedAtMs": None,
+                "_nextRefreshAtMs": None,
+                "_dailyRefreshAttemptDay": None,
+                "_dailyRefreshAttemptAtMs": None,
+                "_dailyRefreshSuccessDay": None,
+                "_refreshedThisCycle": False,
+            }
+        )
+    save_dashboard_snapshot_rows(rows, root)
+
+
 def apply_profile_to_opencode(auth_path: Path, profile: JsonDict) -> list[Path]:
     backups: list[Path] = []
     auth_data = read_json(auth_path)
@@ -4726,7 +5398,8 @@ def switch_alias(
     alias: str,
     opencode_auth_path: Path | None = None,
     audit_event: JsonDict | None = None,
-) -> int:
+    restart_openclaw_runtime_fn: Callable[[], JsonDict] | None = None,
+) -> JsonDict:
     store = load_store(root)
     accounts = store.get("accounts", {})
     detected_from_alias = detect_current_alias(root)
@@ -4743,9 +5416,14 @@ def switch_alias(
 
     dirs = agent_dirs(root) if variant_is_openclaw() else []
     if variant_is_openclaw() and not dirs:
-        raise ValueError("没有找到 ~/.openclaw/agents 下的 agent 目录")
+        raise ValueError(f"没有找到 {root_agents_dir(root)} 下的 agent 目录")
 
     backup_paths: list[Path] = []
+    openclaw_restart = {
+        "attempted": False,
+        "ok": False,
+        "reason": "not-requested",
+    }
     target_opencode_auth = opencode_auth_path or OPENCODE_AUTH_FILE
     payload = dict(audit_event or {})
     payload.setdefault("action", "account-switch")
@@ -4766,22 +5444,34 @@ def switch_alias(
         if variant_is_openclaw():
             for adir in dirs:
                 backup_paths.extend(apply_profile_to_agent(adir, profile))
+                backup_paths.extend(clear_agent_session_overrides(adir))
         if variant_is_opencode():
             backup_paths.extend(
                 apply_profile_to_opencode(target_opencode_auth, profile)
             )
         store["active"] = alias
         save_store(store, root)
+        sync_dashboard_snapshot_after_switch(root, from_alias, alias, profile)
+        if variant_is_openclaw():
+            restart_fn = (
+                restart_openclaw_runtime_fn or restart_openclaw_runtime_after_switch
+            )
+            openclaw_restart = restart_fn()
         payload["status"] = "success"
         payload["backupPaths"] = [str(path) for path in backup_paths]
+        payload["openclawRuntimeRestart"] = openclaw_restart
         write_switch_audit_event(payload, root)
     except Exception as exc:
         payload["status"] = "failed"
         payload["error"] = str(exc)
         payload["backupPaths"] = [str(path) for path in backup_paths]
+        payload["openclawRuntimeRestart"] = openclaw_restart
         write_switch_audit_event(payload, root)
         raise
-    return len(dirs)
+    return {
+        "updatedAgentCount": len(dirs),
+        "openclawRuntimeRestart": openclaw_restart,
+    }
 
 
 def cmd_switch(alias: str) -> int:
@@ -4794,8 +5484,8 @@ def cmd_switch(alias: str) -> int:
     if variant_is_openclaw():
         dirs = agent_dirs(ROOT)
         if not dirs:
-            raise ValueError("没有找到 ~/.openclaw/agents 下的 agent 目录")
-    changed = switch_alias(
+            raise ValueError(f"没有找到 {root_agents_dir(ROOT)} 下的 agent 目录")
+    switch_result = switch_alias(
         ROOT,
         alias,
         audit_event={
@@ -4807,11 +5497,36 @@ def cmd_switch(alias: str) -> int:
 
     print(f"已切换到账号：{alias}")
     if variant_is_openclaw():
+        changed = int(switch_result.get("updatedAgentCount", 0) or 0)
         print(f"- 已更新 agent 目录数：{changed}")
+        restart_status = switch_result.get("openclawRuntimeRestart", {})
+        if isinstance(restart_status, dict):
+            if restart_status.get("ok"):
+                if restart_status.get("mode") in {
+                    "detached-stop-start-script",
+                    "visible-stop-start-script",
+                }:
+                    print(
+                        "- 已触发 OpenClAW 独立重启脚本：gateway stop -> gateway start"
+                    )
+                else:
+                    print("- 已触发 OpenClAW 运行时重载：gateway restart")
+            elif restart_status.get("attempted"):
+                detail = str(
+                    restart_status.get("stderr")
+                    or restart_status.get("error")
+                    or "未知错误"
+                )
+                print(f"- OpenClAW 运行时重载失败：{detail}")
+            else:
+                print(
+                    "- 未触发 OpenClAW 运行时重载：当前环境未找到可用的 gateway restart 命令"
+                )
     if variant_is_opencode():
         print(f"- 已同步 OpenCode 凭据：{OPENCODE_AUTH_FILE}")
     print(f"- 已记录切号日志：{switch_audit_log_file(ROOT)}")
-    print("- 一般无需重启；如果当前会话仍报 401，可再切一次账号或重开会话")
+    if variant_is_openclaw():
+        print("- OpenClAW 已额外尝试重载运行时认证，目标是让当前 live 会话也吃到新账号")
     return 0
 
 
@@ -4915,6 +5630,7 @@ def cmd_menu() -> int:
         return 1
     dashboard_state = DashboardState()
     refresh_dashboard_rows_from_store(dashboard_state, ROOT)
+    start_initial_dashboard_full_refresh(dashboard_state, ROOT)
 
     def build_home_text() -> str:
         rows = get_dashboard_rows_cached(dashboard_state, ROOT)
@@ -5153,6 +5869,10 @@ def main() -> int:
     set_default_console_size()
     cmd = str(getattr(args, "cmd", "") or "menu")
     try:
+        if cmd == "menu" and not str(os.environ.get("GT_VARIANT", "") or "").strip():
+            selected_variant = choose_runtime_variant()
+            os.environ["GT_VARIANT"] = selected_variant
+            set_app_variant(selected_variant)
         with hidden_cursor():
             if cmd == "save":
                 return cmd_save(args.alias)

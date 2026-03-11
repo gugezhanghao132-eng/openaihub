@@ -45,9 +45,7 @@ Invoke-WithSpinner -Message 'Updating PATH...' -Action {
   }
 }
 
-Invoke-WithSpinner -Message 'Removing installed files...' -Action {
-  Remove-Item -Path $using:InstallRoot -Recurse -Force -ErrorAction SilentlyContinue
-}
-
 Write-Host 'OpenAI Hub uninstall complete.'
-Write-Host ('Removed path: ' + $InstallRoot)
+Write-Host 'Command aliases removed from PATH.'
+Write-Host ('User data preserved at: ' + $InstallRoot)
+Write-Host 'If you want to fully remove saved accounts and config, delete that folder manually.'
