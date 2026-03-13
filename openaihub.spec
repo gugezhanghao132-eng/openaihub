@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-ROOT = Path(SPEC).resolve().parent
+ROOT = Path.cwd().resolve()
 
 
 a = Analysis(
@@ -12,15 +12,9 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ROOT / 'package' / 'app' / 'openai_codex_login_helper.mjs'), '.'),
-        (str(ROOT / 'package' / 'app' / 'openclaw_restart_gateway.ps1'), '.'),
-        (str(ROOT / 'package' / 'app' / 'openclaw_restart_gateway.sh'), '.'),
         (str(ROOT / 'package' / 'app' / 'bundled_runtime'), 'bundled_runtime'),
     ],
-    hiddenimports=[
-        'openclaw_oauth_switcher',
-        'requests',
-        'rich',
-    ],
+    hiddenimports=['openclaw_oauth_switcher', 'openai_hub_api_gateway'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
