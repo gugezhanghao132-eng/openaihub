@@ -110,7 +110,7 @@ class ReleaseAssetVerifierTests(unittest.TestCase):
                     subprocess.CompletedProcess(
                         args=["openaihub.exe", "--version"],
                         returncode=0,
-                        stdout="OpenAI Hub 1.1.16\n",
+                        stdout="OpenAI Hub 1.1.17\n",
                         stderr="",
                     ),
                     subprocess.CompletedProcess(
@@ -149,7 +149,7 @@ class ReleaseAssetVerifierTests(unittest.TestCase):
                     subprocess.CompletedProcess(
                         args=["openaihub.exe", "--version"],
                         returncode=0,
-                        stdout="OpenAI Hub 1.1.16\n",
+                        stdout="OpenAI Hub 1.1.17\n",
                         stderr="",
                     ),
                     subprocess.CompletedProcess(
@@ -248,7 +248,7 @@ class ReleaseAssetVerifierTests(unittest.TestCase):
                             subprocess.CompletedProcess(
                                 args=["openaihub-bin", "--version"],
                                 returncode=0,
-                                stdout="OpenAI Hub 1.1.16\n",
+                                stdout="OpenAI Hub 1.1.17\n",
                                 stderr="",
                             ),
                             subprocess.CompletedProcess(
