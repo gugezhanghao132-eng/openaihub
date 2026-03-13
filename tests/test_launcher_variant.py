@@ -149,6 +149,81 @@ class LauncherVariantTests(unittest.TestCase):
             [{"alias": "cached", "isCurrent": True}],
         )
 
+    def test_cmd_menu_starts_background_api_gateway_before_rendering_menu(self) -> None:
+        sys.modules.pop("openclaw_oauth_switcher", None)
+        switcher = load_module("openclaw_oauth_switcher", SWITCHER_PATH)
+
+        calls: list[tuple[str, object]] = []
+
+        setattr(switcher, "ensure_environment_ready_for_menu", lambda: True)
+        setattr(
+            switcher,
+            "refresh_dashboard_rows_from_store",
+            lambda state, root: calls.append(("snapshot", root)) or [],
+        )
+        setattr(
+            switcher,
+            "start_initial_dashboard_full_refresh",
+            lambda state, root: calls.append(("dashboard", root)),
+        )
+        setattr(
+            switcher,
+            "ensure_background_api_gateway_running",
+            lambda root: calls.append(("api", root))
+            or {
+                "url": "http://127.0.0.1:8321",
+                "apiKey": "demo-key",
+                "stateFile": "demo-state.json",
+                "started": True,
+            },
+        )
+        setattr(switcher, "choose_from_menu", lambda *args, **kwargs: None)
+
+        exit_code = switcher.cmd_menu()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[0][0], "snapshot")
+        self.assertEqual(calls[1][0], "dashboard")
+        self.assertEqual(calls[2][0], "api")
+
+    def test_menu_api_config_allows_updating_api_key(self) -> None:
+        sys.modules.pop("openclaw_oauth_switcher_api_menu_update", None)
+        switcher = load_module("openclaw_oauth_switcher_api_menu_update", SWITCHER_PATH)
+
+        shown: list[tuple[str, str | None]] = []
+
+        setattr(
+            switcher,
+            "ensure_background_api_gateway_running",
+            lambda root: {
+                "url": "http://127.0.0.1:8321",
+                "apiKey": "old-key",
+                "stateFile": "state.json",
+                "started": False,
+            },
+        )
+        setattr(
+            switcher,
+            "choose_from_menu",
+            lambda *args, **kwargs: {"key": "set-key"},
+        )
+        setattr(switcher, "prompt_text", lambda _prompt: "new-key")
+        setattr(
+            switcher,
+            "cmd_api_set_key",
+            lambda api_key: shown.append(("updated", api_key)) or 0,
+        )
+        setattr(
+            switcher,
+            "show_status_screen",
+            lambda message, detail=None: shown.append((message, detail)),
+        )
+
+        exit_code = switcher.show_api_config_menu()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(("updated", "new-key"), shown)
+
 
 if __name__ == "__main__":
     unittest.main()
