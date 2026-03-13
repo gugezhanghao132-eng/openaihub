@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import importlib
+import importlib.util
 import base64
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -217,7 +219,7 @@ def variant_is_opencode() -> bool:
 
 
 def variant_requires_openclaw_login() -> bool:
-    return get_app_variant() in {"full", "openclaw"}
+    return get_app_variant() in {"full", "openclaw", "opencode"}
 
 
 def variant_requires_opencode_config() -> bool:
@@ -448,6 +450,7 @@ def build_main_menu_options() -> list[JsonDict]:
         {"key": "switch", "label": "切换账号"},
         {"key": "rename", "label": "修改名称"},
         {"key": "remove", "label": "删除账号"},
+        {"key": "api-config", "label": "API 配置"},
         {"key": "refresh", "label": "刷新状态"},
         {"key": "exit", "label": "退出程序"},
     ]
@@ -3142,17 +3145,6 @@ def get_selected_alias(root: Path = ROOT) -> str | None:
     return aliases[0] if aliases else None
 
 
-def get_selected_profile(root: Path = ROOT) -> JsonDict:
-    alias = get_selected_alias(root)
-    if not alias:
-        raise ValueError("当前还没有已添加的账号。")
-    store = load_store(root)
-    profile = normalize_saved_profile(store.get("accounts", {}).get(alias, {}))
-    if not profile.get("refresh") or not profile.get("accountId"):
-        raise ValueError(f"当前选中的账号凭据无效：{alias}")
-    return profile
-
-
 def profile_matches(left: JsonDict, right: JsonDict) -> bool:
     return (
         left.get("provider") == right.get("provider") == PROVIDER_KEY
@@ -3162,8 +3154,6 @@ def profile_matches(left: JsonDict, right: JsonDict) -> bool:
 
 
 def detect_current_alias(root: Path = ROOT) -> str | None:
-    if variant_is_opencode() and not variant_is_openclaw():
-        return get_selected_alias(root)
     current = extract_current_profile(root)
     store = load_store(root)
     for alias, profile in store.get("accounts", {}).items():
@@ -5125,11 +5115,7 @@ def show_dashboard_overview_in_place(
 
 
 def cmd_save(alias: str) -> int:
-    profile = (
-        get_selected_profile(ROOT)
-        if variant_is_opencode() and not variant_is_openclaw()
-        else extract_current_profile(ROOT)
-    )
+    profile = extract_current_profile(ROOT)
     store = load_store(ROOT)
     store["accounts"][alias] = {
         **profile,
@@ -5250,6 +5236,132 @@ def cmd_import() -> int:
     print(f"已导入当前登录态：{saved_alias}")
     print("- 你可以先用官方登录，然后回到这里执行导入")
     return 0
+
+
+def load_api_gateway_module():
+    if __package__:
+        return importlib.import_module(f"{__package__}.openai_hub_api_gateway")
+    try:
+        return importlib.import_module("openai_hub_api_gateway")
+    except ModuleNotFoundError:
+        spec = importlib.util.spec_from_file_location(
+            "openai_hub_api_gateway", SCRIPT_DIR / "openai_hub_api_gateway.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+def cmd_api_info() -> int:
+    gateway = load_api_gateway_module()
+    config = gateway.ensure_gateway_config(ROOT)
+    base_url_fn = getattr(gateway, "gateway_base_url", None)
+    if callable(base_url_fn):
+        base_url = base_url_fn(config)
+    else:
+        base_url = f"http://{config['host']}:{config['port']}"
+    print("本地 API 网关信息：")
+    print(f"- 地址：{base_url}")
+    print(f"- API Key：{config['apiKey']}")
+    print(f"- 状态文件：{config['stateFile']}")
+    print("- 接口：GET /v1/models, POST /v1/chat/completions")
+    return 0
+
+
+def ensure_background_api_gateway_running(root: Path = ROOT) -> JsonDict:
+    gateway = load_api_gateway_module()
+    runner = getattr(gateway, "ensure_background_gateway_running", None)
+    if callable(runner):
+        result = runner(root)
+        if isinstance(result, dict):
+            return result
+    config = gateway.ensure_gateway_config(root)
+    base_url_fn = getattr(gateway, "gateway_base_url", None)
+    url = (
+        base_url_fn(config)
+        if callable(base_url_fn)
+        else f"http://{config['host']}:{config['port']}"
+    )
+    return {
+        "url": url,
+        "apiKey": str(config.get("apiKey") or ""),
+        "stateFile": str(config.get("stateFile") or ""),
+        "started": False,
+    }
+
+
+def cmd_api_config() -> int:
+    result = ensure_background_api_gateway_running(ROOT)
+    print("本地 API 配置：")
+    print(f"- 地址：{result['url']}")
+    print(f"- API Key：{result['apiKey']}")
+    print(f"- 状态文件：{result['stateFile']}")
+    status_text = "已启动" if result.get("started") else "运行中"
+    print(f"- 后台服务：{status_text}")
+    return 0
+
+
+def cmd_api_set_key(api_key: str) -> int:
+    gateway = load_api_gateway_module()
+    config = gateway.set_gateway_api_key(ROOT, api_key)
+    print("API Key 已更新：")
+    print(f"- 地址：http://{config['host']}:{config['port']}")
+    print(f"- API Key：{config['apiKey']}")
+    print(f"- 状态文件：{config['stateFile']}")
+    return 0
+
+
+def show_api_config_menu() -> int:
+    result = ensure_background_api_gateway_running(ROOT)
+    picked = choose_from_menu(
+        title="API 配置",
+        options=[
+            {
+                "key": "show",
+                "label": "查看当前配置",
+                "description": "查看本地 URL、API Key 和状态文件",
+            },
+            {
+                "key": "set-key",
+                "label": "修改 API Key",
+                "description": "手动设置新的 API Key",
+            },
+            {"key": "back", "label": "返回"},
+        ],
+        hint="选择一个操作后回到主菜单",
+        panel_header_status="本地 API 已后台运行",
+        panel_footer_status=str(result.get("url") or ""),
+    )
+    if not picked:
+        return 0
+    action = str(picked.get("key") or "")
+    if action == "show":
+        show_status_screen(
+            "本地 API 配置",
+            "\n".join(
+                [
+                    f"地址：{result['url']}",
+                    f"API Key：{result['apiKey']}",
+                    f"状态文件：{result['stateFile']}",
+                    f"后台服务：{'已启动' if result.get('started') else '运行中'}",
+                ]
+            ),
+        )
+        return 0
+    if action == "set-key":
+        new_key = prompt_text("请输入新的 API Key")
+        if not new_key:
+            show_status_screen("已取消修改 API Key")
+            return 0
+        return cmd_api_set_key(new_key)
+    return 0
+
+
+def cmd_api_serve(host: str | None = None, port: int | None = None) -> int:
+    gateway = load_api_gateway_module()
+    return int(gateway.serve_local_api_gateway(ROOT, host=host, port=port))
 
 
 def cmd_list() -> int:
@@ -5576,12 +5688,8 @@ def cmd_remove(alias: str) -> int:
 
 
 def cmd_usage() -> int:
-    if variant_is_opencode() and not variant_is_openclaw():
-        alias = get_selected_alias(ROOT)
-        profile = get_selected_profile(ROOT)
-    else:
-        profile = extract_current_profile(ROOT)
-        alias = detect_current_alias(ROOT)
+    profile = extract_current_profile(ROOT)
+    alias = detect_current_alias(ROOT)
     store = load_store(ROOT)
     display_name = (
         get_account_display_name(alias, store.get("accounts", {}).get(alias, {}))
@@ -5652,6 +5760,7 @@ def cmd_menu() -> int:
     dashboard_state = DashboardState()
     refresh_dashboard_rows_from_store(dashboard_state, ROOT)
     start_initial_dashboard_full_refresh(dashboard_state, ROOT)
+    api_runtime = ensure_background_api_gateway_running(ROOT)
 
     def build_home_text() -> str:
         rows = get_dashboard_rows_cached(dashboard_state, ROOT)
@@ -5793,6 +5902,9 @@ def cmd_menu() -> int:
                     )
                     refresh_dashboard_rows_from_store(dashboard_state, ROOT)
                 continue
+            if action == "api-config":
+                show_api_config_menu()
+                continue
             if action == "current":
                 run_action_with_status(cmd_current, "当前账号")
                 continue
@@ -5876,6 +5988,13 @@ def parser() -> argparse.ArgumentParser:
     p_logs = sub.add_parser("logs", help="show recent account switch audit logs")
     p_logs.add_argument("--limit", type=int, default=20)
     sub.add_parser("dashboard", help="show account dashboard")
+    sub.add_parser("api-config", help="show local API config")
+    sub.add_parser("api-info", help="show local API gateway url and key")
+    p_api_serve = sub.add_parser(
+        "api-serve", help="start local OpenAI-compatible API gateway"
+    )
+    p_api_serve.add_argument("--host", default=None)
+    p_api_serve.add_argument("--port", type=int, default=None)
     sub.add_parser("menu", help="interactive menu for switching")
     sub.add_parser("login-start", help="start manual oauth login session")
     p_login_finish = sub.add_parser(
@@ -5922,6 +6041,12 @@ def main() -> int:
                 return cmd_show_logs(args.limit)
             if cmd == "dashboard":
                 return cmd_dashboard()
+            if cmd == "api-config":
+                return cmd_api_config()
+            if cmd == "api-info":
+                return cmd_api_info()
+            if cmd == "api-serve":
+                return cmd_api_serve(args.host, args.port)
             if cmd == "menu":
                 return cmd_menu()
             if cmd == "login-start":
