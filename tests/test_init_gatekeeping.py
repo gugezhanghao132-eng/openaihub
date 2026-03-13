@@ -37,6 +37,16 @@ def run_with_loading_stub(
 
 
 class InitGatekeepingTests(unittest.TestCase):
+    def test_variant_requires_openclaw_login_excludes_opencode_mode(self) -> None:
+        original_variant = MODULE.APP_VARIANT
+        try:
+            setattr(MODULE, "APP_VARIANT", "opencode")
+            requires_openclaw_login = MODULE.variant_requires_openclaw_login()
+        finally:
+            setattr(MODULE, "APP_VARIANT", original_variant)
+
+        self.assertFalse(requires_openclaw_login)
+
     def test_load_store_migrates_legacy_store_into_hub_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             base = Path(tmp_dir)
@@ -1186,6 +1196,199 @@ class InitGatekeepingTests(unittest.TestCase):
                 setattr(MODULE, "APP_VARIANT", original_variant)
 
         self.assertTrue(ready)
+
+    def test_switch_alias_in_opencode_mode_does_not_require_openclaw_runtime_token(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / ".openaihub"
+            openclaw_root = base / ".openclaw"
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(opencode_auth, {})
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "source",
+                    "accounts": {
+                        "source": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "source-access",
+                            "refresh": "source-refresh",
+                            "expires": 1,
+                            "accountId": "source-account",
+                        },
+                        "target": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "target-access",
+                            "refresh": "target-refresh",
+                            "expires": 2,
+                            "accountId": "target-account",
+                        },
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_openclaw_root = MODULE.OPENCLAW_ROOT
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
+                result = MODULE.switch_alias(
+                    root, "target", opencode_auth_path=opencode_auth
+                )
+                written_auth = MODULE.read_json(opencode_auth)
+                written_store = MODULE.load_store(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
+
+        self.assertEqual(result["updatedAgentCount"], 0)
+        self.assertEqual(written_auth["openai"]["refresh"], "target-refresh")
+        self.assertEqual(written_store["active"], "target")
+
+    def test_cmd_usage_in_opencode_mode_uses_selected_saved_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / ".openaihub"
+            openclaw_root = base / ".openclaw"
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "saved",
+                    "accounts": {
+                        "saved": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "saved-access",
+                            "refresh": "saved-refresh",
+                            "expires": 3,
+                            "accountId": "saved-account",
+                            "displayName": "Saved Account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_root = MODULE.ROOT
+            original_variant = MODULE.APP_VARIANT
+            original_openclaw_root = MODULE.OPENCLAW_ROOT
+            original_fetch = MODULE.fetch_codex_usage
+            output = io.StringIO()
+            try:
+                setattr(MODULE, "ROOT", root)
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
+                setattr(
+                    MODULE,
+                    "fetch_codex_usage",
+                    lambda profile: {
+                        "plan": "team",
+                        "windows": [
+                            {"label": "5h", "usedPercent": 12.0, "resetAt": None}
+                        ],
+                    },
+                )
+                with redirect_stdout(output):
+                    exit_code = MODULE.cmd_usage()
+            finally:
+                setattr(MODULE, "ROOT", original_root)
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
+                setattr(MODULE, "fetch_codex_usage", original_fetch)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Saved Account", output.getvalue())
+        self.assertIn("saved-account", output.getvalue())
+
+    def test_detect_current_alias_in_opencode_mode_uses_selected_saved_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / ".openaihub"
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "selected",
+                    "accounts": {
+                        "selected": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "selected-access",
+                            "refresh": "selected-refresh",
+                            "expires": 4,
+                            "accountId": "selected-account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                alias = MODULE.detect_current_alias(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+
+        self.assertEqual(alias, "selected")
+
+    def test_cmd_save_in_opencode_mode_uses_selected_saved_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / ".openaihub"
+            openclaw_root = base / ".openclaw"
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "selected",
+                    "accounts": {
+                        "selected": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "selected-access",
+                            "refresh": "selected-refresh",
+                            "expires": 5,
+                            "accountId": "selected-account",
+                            "displayName": "Selected Account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_root = MODULE.ROOT
+            original_variant = MODULE.APP_VARIANT
+            original_openclaw_root = MODULE.OPENCLAW_ROOT
+            output = io.StringIO()
+            try:
+                setattr(MODULE, "ROOT", root)
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
+                with redirect_stdout(output):
+                    exit_code = MODULE.cmd_save("snapshot")
+                written_store = MODULE.load_store(root)
+            finally:
+                setattr(MODULE, "ROOT", original_root)
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(written_store["active"], "snapshot")
+        self.assertEqual(
+            written_store["accounts"]["snapshot"]["accountId"], "selected-account"
+        )
+        self.assertEqual(
+            written_store["accounts"]["snapshot"]["refresh"], "selected-refresh"
+        )
+        self.assertIn("已保存账号别名：snapshot", output.getvalue())
+        self.assertIn("selected-account", output.getvalue())
 
     def test_full_mode_allows_menu_when_openclaw_program_not_installed_but_paths_valid(
         self,

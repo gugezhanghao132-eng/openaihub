@@ -217,7 +217,7 @@ def variant_is_opencode() -> bool:
 
 
 def variant_requires_openclaw_login() -> bool:
-    return get_app_variant() in {"full", "openclaw", "opencode"}
+    return get_app_variant() in {"full", "openclaw"}
 
 
 def variant_requires_opencode_config() -> bool:
@@ -3142,6 +3142,17 @@ def get_selected_alias(root: Path = ROOT) -> str | None:
     return aliases[0] if aliases else None
 
 
+def get_selected_profile(root: Path = ROOT) -> JsonDict:
+    alias = get_selected_alias(root)
+    if not alias:
+        raise ValueError("当前还没有已添加的账号。")
+    store = load_store(root)
+    profile = normalize_saved_profile(store.get("accounts", {}).get(alias, {}))
+    if not profile.get("refresh") or not profile.get("accountId"):
+        raise ValueError(f"当前选中的账号凭据无效：{alias}")
+    return profile
+
+
 def profile_matches(left: JsonDict, right: JsonDict) -> bool:
     return (
         left.get("provider") == right.get("provider") == PROVIDER_KEY
@@ -3151,6 +3162,8 @@ def profile_matches(left: JsonDict, right: JsonDict) -> bool:
 
 
 def detect_current_alias(root: Path = ROOT) -> str | None:
+    if variant_is_opencode() and not variant_is_openclaw():
+        return get_selected_alias(root)
     current = extract_current_profile(root)
     store = load_store(root)
     for alias, profile in store.get("accounts", {}).items():
@@ -5112,7 +5125,11 @@ def show_dashboard_overview_in_place(
 
 
 def cmd_save(alias: str) -> int:
-    profile = extract_current_profile(ROOT)
+    profile = (
+        get_selected_profile(ROOT)
+        if variant_is_opencode() and not variant_is_openclaw()
+        else extract_current_profile(ROOT)
+    )
     store = load_store(ROOT)
     store["accounts"][alias] = {
         **profile,
@@ -5559,8 +5576,12 @@ def cmd_remove(alias: str) -> int:
 
 
 def cmd_usage() -> int:
-    profile = extract_current_profile(ROOT)
-    alias = detect_current_alias(ROOT)
+    if variant_is_opencode() and not variant_is_openclaw():
+        alias = get_selected_alias(ROOT)
+        profile = get_selected_profile(ROOT)
+    else:
+        profile = extract_current_profile(ROOT)
+        alias = detect_current_alias(ROOT)
     store = load_store(ROOT)
     display_name = (
         get_account_display_name(alias, store.get("accounts", {}).get(alias, {}))
