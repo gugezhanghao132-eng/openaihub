@@ -1,4 +1,4 @@
-# OpenAI Hub 1.1.20
+# OpenAI Hub 1.1.21
 
 OpenAI Hub 是一个给 OpenClAW 和 OpenCode 使用的账号池启动器。
 
@@ -23,10 +23,12 @@ OpenAI Hub 是一个给 OpenClAW 和 OpenCode 使用的账号池启动器。
 推荐命令：
 
 ```bash
-npm install -g openaihub
+npm install -g openaihub --registry https://registry.npmjs.org
 ```
 
 这是一条安装和更新通用命令，也是当前唯一推荐的安装方式。
+
+如果你不显式指定 `--registry https://registry.npmjs.org`，某些电脑可能会因为本机 npm 默认源被改成镜像站而安装到旧版本。
 
 安装完成后，重新打开终端，运行：
 
@@ -42,9 +44,21 @@ OAH
 
 说明：
 
-- 当前只推荐使用 `npm install -g openaihub`
+- 当前只推荐使用 `npm install -g openaihub --registry https://registry.npmjs.org`
 - npm 安装链路按平台区分运行时：Windows x64、macOS arm64、macOS x64
 - GitHub Release 里的平台资产是给 npm 安装器拉取运行时用的，不再作为单独给用户的安装入口
+
+如果你安装后发现版本不是最新，请先执行：
+
+```bash
+npm config get registry
+```
+
+如果输出不是 `https://registry.npmjs.org/`，说明你的电脑当前正在使用镜像源。请直接重新执行：
+
+```bash
+npm install -g openaihub --registry https://registry.npmjs.org
+```
 
 安装后默认目录：
 
@@ -101,7 +115,7 @@ npm -v
 如果这条命令报错，说明你的电脑里还没有 npm。你需要先安装 Node.js（安装 Node.js 时通常会一起带上 npm），然后才能使用：
 
 ```bash
-npm install -g openaihub
+npm install -g openaihub --registry https://registry.npmjs.org
 ```
 
 ### 第二步：安装 OpenAI Hub
@@ -109,13 +123,13 @@ npm install -g openaihub
 推荐优先使用：
 
 ```bash
-npm install -g openaihub
+npm install -g openaihub --registry https://registry.npmjs.org
 ```
 
 当前不再提供额外的直装命令，统一使用：
 
 ```bash
-npm install -g openaihub
+npm install -g openaihub --registry https://registry.npmjs.org
 ```
 
 ### 第三步：确认 OpenClAW / OpenCode 已经生成默认目录
@@ -273,8 +287,8 @@ macOS 用户同样按这个默认目录检测：
 
 ## 当前状态
 
-- npm 最新版：`openaihub@1.1.20`
-- npm 安装命令已可直接使用
+- npm 最新版：`openaihub@1.1.21`
+- npm 安装命令建议固定使用官方源版本
 - 已验证命令：`openaihub`、`OAH`、`openaihub --version`
 - npm 安装链按平台拉取 Windows / macOS 对应运行时
 - GitHub Release 平台资产用于 npm 运行时分发，不再作为单独安装入口
