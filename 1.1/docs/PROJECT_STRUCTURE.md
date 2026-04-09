@@ -20,7 +20,7 @@
 │  ├─ package.json          # npm 包元数据与版本
 │  ├─ PUBLISHING.md         # 发布说明
 │  ├─ README.md             # npm 包说明
-│  └─ openaihub-1.1.22.tgz  # 当前最新本地打包产物
+│  └─ openaihub-1.1.23.tgz  # 当前最新本地打包产物
 ├─ package/                 # Python 主程序包
 │  ├─ app/                  # 核心业务代码
 │  │  ├─ bundled_runtime/
