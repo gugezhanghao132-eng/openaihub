@@ -1,0 +1,79 @@
+name: Build OpenAI Hub release assets
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'openaihub-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependency
+        run: python -m pip install pyinstaller
+
+      - name: Build Windows runtime
+        run: python -m PyInstaller openaihub.spec -y --distpath dist --workpath build_release_ci/work --clean
+
+      - name: Copy runtime support files into Windows runtime root
+        shell: pwsh
+        run: |
+          Copy-Item package/version.txt dist/openaihub/version.txt -Force
+          Copy-Item package/app/openclaw_restart_gateway.ps1 dist/openaihub/openclaw_restart_gateway.ps1 -Force
+          Copy-Item package/app/openclaw_restart_gateway.sh dist/openaihub/openclaw_restart_gateway.sh -Force
+
+      - name: Archive Windows runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          if (Test-Path release-assets/openaihub-windows.zip) { Remove-Item release-assets/openaihub-windows.zip -Force }
+          Compress-Archive -Path dist/openaihub/* -DestinationPath release-assets/openaihub-windows.zip -Force
+
+      - name: Upload Windows release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/openaihub-windows.zip
+
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            expected_asset: openaihub-macos-x64.tar.gz
+          - runner: macos-14
+            expected_asset: openaihub-macos-arm64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependency
+        run: python3 -m pip install pyinstaller
+
+      - name: Build macOS runtime
+        run: bash scripts/build-macos.sh
+
+      - name: Verify expected macOS asset exists
+        run: test -f "release-assets/${{ matrix.expected_asset }}"
+
+      - name: Upload macOS release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/${{ matrix.expected_asset }}
