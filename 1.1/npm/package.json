@@ -1,0 +1,23 @@
+{
+  "name": "openaihub",
+  "version": "1.1.22",
+  "description": "OpenAI Hub CLI installer and launcher",
+  "license": "MIT",
+  "bin": {
+    "openaihub": "bin/openaihub.js",
+    "OAH": "bin/OAH.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "runtime",
+    "scripts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
