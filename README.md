@@ -1,4 +1,4 @@
-# OpenAI Hub 1.1.23
+# OpenAI Hub 1.1.24
 
 OpenAI Hub 是一个给 OpenClAW 和 OpenCode 使用的账号池启动器。
 
@@ -262,7 +262,7 @@ macOS 用户同样按这个默认目录检测：
 
 ## 当前状态
 
-- npm 最新版：`openaihub@1.1.23`
+- npm 最新版：`openaihub@1.1.24`
 - 安装与更新共用同一条官方源命令
 - 已验证命令：`openaihub`、`OAH`、`openaihub --version`
 - npm 安装链按平台拉取 Windows / macOS 对应运行时
