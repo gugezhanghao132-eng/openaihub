@@ -9,7 +9,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-APP_RELEASE_VERSION = "1.1.18"
+APP_RELEASE_VERSION = (
+    (SCRIPT_DIR.parent / "version.txt").read_text(encoding="utf-8").strip()
+)
 APP_COMMAND_NAME = "openaihub"
 APP_SHORT_COMMAND = "OAH"
 
@@ -27,7 +29,7 @@ def choose_variant() -> str:
         {
             "key": "full",
             "label": "综合模式",
-            "description": "检查 OpenClAW + OpenCode，切号时两边一起切",
+            "description": "检查 OpenClAW + OpenCode + Hermes，切号时全部一起切",
         },
         {
             "key": "opencode",
@@ -38,6 +40,11 @@ def choose_variant() -> str:
             "key": "openclaw",
             "label": "OpenClAW 模式",
             "description": "只检查 OpenClAW，切号时只改 OpenClAW",
+        },
+        {
+            "key": "hermes",
+            "label": "Hermes 模式",
+            "description": "只检查 Hermes，切号时只改 Hermes",
         },
     ]
     selected = switcher.choose_from_menu(
@@ -63,9 +70,10 @@ def print_help() -> None:
     print(f"  {APP_SHORT_COMMAND}          Alias of {APP_COMMAND_NAME}")
     print()
     print("Modes:")
-    print("  full       Check OpenClAW + OpenCode, switch both")
+    print("  full       Check OpenClAW + OpenCode + Hermes, switch all")
     print("  opencode   Check OpenClAW + OpenCode, switch OpenCode only")
     print("  openclaw   Check OpenClAW only, switch OpenClAW only")
+    print("  hermes     Check Hermes only, switch Hermes only")
 
 
 def print_unknown_args(args: list[str]) -> int:

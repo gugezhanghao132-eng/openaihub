@@ -21,6 +21,45 @@ def load_module(module_name: str, path: Path):
 
 
 class LauncherVariantTests(unittest.TestCase):
+    def test_launcher_choose_variant_lists_hermes_mode(self) -> None:
+        for name in ["openclaw_oauth_switcher", "openai_launcher"]:
+            sys.modules.pop(name, None)
+
+        try:
+            switcher = load_module("openclaw_oauth_switcher", SWITCHER_PATH)
+            launcher = load_module("openai_launcher", LAUNCHER_PATH)
+            captured: dict[str, object] = {}
+
+            def fake_choose_from_menu(**kwargs):
+                captured.update(kwargs)
+                return {"key": "hermes"}
+
+            setattr(switcher, "choose_from_menu", fake_choose_from_menu)
+            setattr(switcher, "hide_cursor", lambda: None)
+
+            selected = launcher.choose_variant()
+        finally:
+            for name in ["openclaw_oauth_switcher", "openai_launcher"]:
+                sys.modules.pop(name, None)
+
+        self.assertEqual(selected, "hermes")
+        options = captured.get("options")
+        self.assertIsInstance(options, list)
+        if not isinstance(options, list):
+            return
+        self.assertIn("hermes", [item.get("key") for item in options])
+
+    def test_launcher_version_matches_package_version_file(self) -> None:
+        sys.modules.pop("openai_launcher_version_sync", None)
+        launcher = load_module("openai_launcher_version_sync", LAUNCHER_PATH)
+        expected_version = (
+            (LAUNCHER_PATH.resolve().parents[1] / "version.txt")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+
+        self.assertEqual(launcher.APP_RELEASE_VERSION, expected_version)
+
     def test_launcher_applies_selected_variant_before_switcher_main(self) -> None:
         original_argv = list(sys.argv)
         original_env = os.environ.get("GT_VARIANT")
@@ -90,6 +129,26 @@ class LauncherVariantTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(seen_variants, ["openclaw"])
+
+    def test_switcher_runtime_variant_lists_hermes_mode(self) -> None:
+        sys.modules.pop("openclaw_oauth_switcher", None)
+        switcher = load_module("openclaw_oauth_switcher", SWITCHER_PATH)
+        captured: dict[str, object] = {}
+
+        def fake_choose_from_menu(**kwargs):
+            captured.update(kwargs)
+            return {"key": "hermes"}
+
+        setattr(switcher, "choose_from_menu", fake_choose_from_menu)
+
+        selected = switcher.choose_runtime_variant()
+
+        self.assertEqual(selected, "hermes")
+        options = captured.get("options")
+        self.assertIsInstance(options, list)
+        if not isinstance(options, list):
+            return
+        self.assertIn("hermes", [item.get("key") for item in options])
 
     def test_cmd_menu_starts_full_refresh_worker_after_loading_snapshot(self) -> None:
         sys.modules.pop("openclaw_oauth_switcher", None)

@@ -37,15 +37,71 @@ def run_with_loading_stub(
 
 
 class InitGatekeepingTests(unittest.TestCase):
-    def test_variant_requires_openclaw_login_excludes_opencode_mode(self) -> None:
-        original_variant = MODULE.APP_VARIANT
-        try:
-            setattr(MODULE, "APP_VARIANT", "opencode")
-            requires_openclaw_login = MODULE.variant_requires_openclaw_login()
-        finally:
-            setattr(MODULE, "APP_VARIANT", original_variant)
+    def setUp(self) -> None:
+        self._hermes_tmp_dir = tempfile.TemporaryDirectory()
+        self._original_hermes_auth_file = getattr(MODULE, "HERMES_AUTH_FILE", None)
+        self._original_hermes_root = getattr(MODULE, "HERMES_ROOT", None)
+        self._original_hermes_state_root = getattr(MODULE, "HERMES_STATE_ROOT", None)
+        hermes_root = Path(self._hermes_tmp_dir.name) / ".hermes"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+        hermes_auth = hermes_root / "auth.json"
+        MODULE.write_json(
+            hermes_auth,
+            {
+                "version": 1,
+                "active_provider": "openai-codex",
+                "providers": {
+                    "openai-codex": {
+                        "auth_mode": "chatgpt",
+                        "last_refresh": "2026-04-15T00:00:00Z",
+                        "tokens": {
+                            "access_token": "temp-hermes-access",
+                            "refresh_token": "temp-hermes-refresh",
+                        },
+                    }
+                },
+                "credential_pool": {
+                    "openai-codex": [
+                        {
+                            "id": "temp-hermes-account",
+                            "label": "temp-hermes-account",
+                            "auth_type": "oauth",
+                            "priority": 0,
+                            "source": "test-default",
+                            "access_token": "temp-hermes-access",
+                            "refresh_token": "temp-hermes-refresh",
+                            "last_status": None,
+                            "last_status_at": None,
+                            "last_error_code": None,
+                            "last_error_reason": None,
+                            "last_error_message": None,
+                            "last_error_reset_at": None,
+                            "base_url": "https://chatgpt.com/backend-api/codex",
+                            "last_refresh": "2026-04-15T00:00:00Z",
+                            "request_count": 0,
+                        }
+                    ]
+                },
+            },
+        )
+        setattr(MODULE, "HERMES_ROOT", hermes_root)
+        setattr(MODULE, "HERMES_AUTH_FILE", hermes_auth)
+        setattr(MODULE, "HERMES_STATE_ROOT", hermes_auth.parent)
 
-        self.assertFalse(requires_openclaw_login)
+    def tearDown(self) -> None:
+        if self._original_hermes_auth_file is None:
+            delattr(MODULE, "HERMES_AUTH_FILE")
+        else:
+            setattr(MODULE, "HERMES_AUTH_FILE", self._original_hermes_auth_file)
+        if self._original_hermes_root is None:
+            delattr(MODULE, "HERMES_ROOT")
+        else:
+            setattr(MODULE, "HERMES_ROOT", self._original_hermes_root)
+        if self._original_hermes_state_root is None:
+            delattr(MODULE, "HERMES_STATE_ROOT")
+        else:
+            setattr(MODULE, "HERMES_STATE_ROOT", self._original_hermes_state_root)
+        self._hermes_tmp_dir.cleanup()
 
     def test_load_store_migrates_legacy_store_into_hub_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -237,6 +293,183 @@ class InitGatekeepingTests(unittest.TestCase):
         self.assertEqual(
             MODULE.root_store_file(hub_root), hub_root / "openai-codex-accounts.json"
         )
+
+    def test_extract_current_profile_reads_opencode_auth_in_opencode_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(
+                opencode_auth,
+                {
+                    "openai": {
+                        "type": "oauth",
+                        "access": "live-access",
+                        "refresh": "live-refresh",
+                        "expires": 1,
+                        "accountId": "live-account",
+                    }
+                },
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_auth_file = MODULE.OPENCODE_AUTH_FILE
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCODE_AUTH_FILE", opencode_auth)
+                profile = MODULE.extract_current_profile(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCODE_AUTH_FILE", original_auth_file)
+
+        self.assertEqual(profile["accountId"], "live-account")
+        self.assertEqual(profile["refresh"], "live-refresh")
+
+    def test_extract_current_profile_reads_hermes_auth_in_hermes_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            hermes_auth = base / "hermes-state" / "auth.json"
+            hermes_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(
+                hermes_auth,
+                {
+                    "version": 1,
+                    "active_provider": "openai-codex",
+                    "providers": {
+                        "openai-codex": {
+                            "auth_mode": "chatgpt",
+                            "last_refresh": "2026-04-15T00:00:00Z",
+                            "tokens": {
+                                "access_token": "live-access",
+                                "refresh_token": "live-refresh",
+                            },
+                        }
+                    },
+                },
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_auth_file = getattr(MODULE, "HERMES_AUTH_FILE", None)
+            try:
+                setattr(MODULE, "APP_VARIANT", "hermes")
+                setattr(MODULE, "HERMES_AUTH_FILE", hermes_auth)
+                profile = MODULE.extract_current_profile(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                if original_auth_file is None:
+                    delattr(MODULE, "HERMES_AUTH_FILE")
+                else:
+                    setattr(MODULE, "HERMES_AUTH_FILE", original_auth_file)
+
+        self.assertEqual(profile["accountId"], "")
+        self.assertEqual(profile["refresh"], "live-refresh")
+        self.assertEqual(profile["access"], "live-access")
+
+    def test_detect_current_alias_uses_opencode_current_profile_in_opencode_mode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(
+                opencode_auth,
+                {
+                    "openai": {
+                        "type": "oauth",
+                        "access": "live-access",
+                        "refresh": "live-refresh",
+                        "expires": 1,
+                        "accountId": "live-account",
+                    }
+                },
+            )
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": None,
+                    "accounts": {
+                        "live": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "live-access",
+                            "refresh": "live-refresh",
+                            "expires": 1,
+                            "accountId": "live-account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_auth_file = MODULE.OPENCODE_AUTH_FILE
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCODE_AUTH_FILE", opencode_auth)
+                alias = MODULE.detect_current_alias(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCODE_AUTH_FILE", original_auth_file)
+
+        self.assertEqual(alias, "live")
+
+    def test_detect_current_alias_falls_back_to_account_id_when_opencode_refresh_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(
+                opencode_auth,
+                {
+                    "openai": {
+                        "type": "oauth",
+                        "access": "new-access",
+                        "refresh": "new-refresh",
+                        "expires": 99,
+                        "accountId": "same-account",
+                    }
+                },
+            )
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "live",
+                    "accounts": {
+                        "live": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "old-access",
+                            "refresh": "old-refresh",
+                            "expires": 1,
+                            "accountId": "same-account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_auth_file = MODULE.OPENCODE_AUTH_FILE
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCODE_AUTH_FILE", opencode_auth)
+                alias = MODULE.detect_current_alias(root)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCODE_AUTH_FILE", original_auth_file)
+
+        self.assertEqual(alias, "live")
 
     def test_switch_alias_restarts_openclaw_runtime_after_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -481,6 +714,210 @@ class InitGatekeepingTests(unittest.TestCase):
             self.assertIsNone(rows["good"].get("_authBlockedRefresh"))
             self.assertNotIn("_authBlockedUntilMs", rows["good"])
 
+    def test_opencode_mode_switch_alias_does_not_require_openclaw_current_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            opencode_auth.write_text("{}\n", encoding="utf-8")
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "from-opencode",
+                    "accounts": {
+                        "from-opencode": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "from-access",
+                            "refresh": "from-refresh",
+                            "expires": 1,
+                            "accountId": "from-account",
+                        },
+                        "target": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "to-access",
+                            "refresh": "to-refresh",
+                            "expires": 99,
+                            "accountId": "to-account",
+                        },
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                result = MODULE.switch_alias(
+                    root, "target", opencode_auth_path=opencode_auth
+                )
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+
+            self.assertEqual(result["updatedAgentCount"], 0)
+            self.assertEqual(MODULE.load_store(root).get("active"), "target")
+            opencode_payload = MODULE.read_json(opencode_auth)
+            self.assertEqual(opencode_payload["openai"]["accountId"], "to-account")
+
+    def test_hermes_mode_switch_alias_only_updates_hermes_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            hermes_auth = base / "hermes-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            hermes_auth.parent.mkdir(parents=True, exist_ok=True)
+            opencode_auth.write_text('{"openai":{"accountId":"old-opencode"}}\n', encoding="utf-8")
+            MODULE.write_json(
+                hermes_auth,
+                {
+                    "version": 1,
+                    "active_provider": "openai-codex",
+                    "providers": {
+                        "openai-codex": {
+                            "auth_mode": "chatgpt",
+                            "last_refresh": "2026-04-15T00:00:00Z",
+                            "tokens": {
+                                "access_token": "old-access",
+                                "refresh_token": "old-refresh",
+                            },
+                        }
+                    },
+                    "credential_pool": {
+                        "openai-codex": [
+                            {
+                                "id": "old-account",
+                                "label": "old-label",
+                                "auth_type": "oauth",
+                                "priority": 0,
+                                "source": "old-source",
+                                "access_token": "old-access",
+                                "refresh_token": "old-refresh",
+                                "last_status": None,
+                                "last_status_at": None,
+                                "last_error_code": None,
+                                "last_error_reason": None,
+                                "last_error_message": None,
+                                "last_error_reset_at": None,
+                                "base_url": "https://chatgpt.com/backend-api/codex",
+                                "last_refresh": "2026-04-14T00:00:00Z",
+                                "request_count": 0,
+                            }
+                        ]
+                    },
+                },
+            )
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "from-hermes",
+                    "accounts": {
+                        "from-hermes": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "from-access",
+                            "refresh": "from-refresh",
+                            "expires": 1,
+                            "accountId": "from-account",
+                        },
+                        "target": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "to-access",
+                            "refresh": "to-refresh",
+                            "expires": 99,
+                            "accountId": "to-account",
+                            "displayName": "Target Account",
+                        },
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_opencode_auth = MODULE.OPENCODE_AUTH_FILE
+            original_hermes_auth = getattr(MODULE, "HERMES_AUTH_FILE", None)
+            try:
+                setattr(MODULE, "APP_VARIANT", "hermes")
+                setattr(MODULE, "OPENCODE_AUTH_FILE", opencode_auth)
+                setattr(MODULE, "HERMES_AUTH_FILE", hermes_auth)
+                result = MODULE.switch_alias(root, "target", opencode_auth_path=opencode_auth)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCODE_AUTH_FILE", original_opencode_auth)
+                if original_hermes_auth is None:
+                    delattr(MODULE, "HERMES_AUTH_FILE")
+                else:
+                    setattr(MODULE, "HERMES_AUTH_FILE", original_hermes_auth)
+
+            self.assertEqual(result["updatedAgentCount"], 0)
+            self.assertEqual(MODULE.load_store(root).get("active"), "target")
+            self.assertEqual(MODULE.read_json(opencode_auth)["openai"]["accountId"], "old-opencode")
+            hermes_payload = MODULE.read_json(hermes_auth)
+            provider = hermes_payload["providers"]["openai-codex"]
+            self.assertEqual(provider["tokens"]["refresh_token"], "to-refresh")
+            self.assertEqual(provider["tokens"]["access_token"], "to-access")
+            self.assertEqual(provider["accountId"], "to-account")
+            pool_entry = hermes_payload["credential_pool"]["openai-codex"][0]
+            self.assertEqual(pool_entry["id"], "to-account")
+            self.assertEqual(pool_entry["label"], "Target Account")
+
+    def test_opencode_switch_alias_preserves_newer_current_credentials_for_same_account(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            root.mkdir(parents=True, exist_ok=True)
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            opencode_auth.write_text(
+                '{"openai":{"type":"oauth","access":"new-access","refresh":"new-refresh","expires":99,"accountId":"same-account"}}\n',
+                encoding="utf-8",
+            )
+            MODULE.save_store(
+                {
+                    "version": 1,
+                    "active": "target",
+                    "accounts": {
+                        "target": {
+                            "type": "oauth",
+                            "provider": MODULE.PROVIDER_KEY,
+                            "access": "old-access",
+                            "refresh": "old-refresh",
+                            "expires": 1,
+                            "accountId": "same-account",
+                            "displayName": "Same Account",
+                        }
+                    },
+                },
+                root,
+            )
+
+            original_variant = MODULE.APP_VARIANT
+            original_auth_file = MODULE.OPENCODE_AUTH_FILE
+            try:
+                setattr(MODULE, "APP_VARIANT", "opencode")
+                setattr(MODULE, "OPENCODE_AUTH_FILE", opencode_auth)
+                MODULE.switch_alias(root, "target", opencode_auth_path=opencode_auth)
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                setattr(MODULE, "OPENCODE_AUTH_FILE", original_auth_file)
+
+            opencode_payload = MODULE.read_json(opencode_auth)
+            store = MODULE.load_store(root)
+
+        self.assertEqual(opencode_payload["openai"]["refresh"], "new-refresh")
+        self.assertEqual(opencode_payload["openai"]["access"], "new-access")
+        self.assertEqual(store["accounts"]["target"]["refresh"], "new-refresh")
+        self.assertEqual(store["accounts"]["target"]["access"], "new-access")
+
     def test_full_mode_allows_valid_paths_when_program_and_provider_probes_fail(
         self,
     ) -> None:
@@ -530,6 +967,144 @@ class InitGatekeepingTests(unittest.TestCase):
                 setattr(MODULE, "APP_VARIANT", original_variant)
 
         self.assertTrue(verification.get("ok"))
+
+    def test_hermes_mode_allows_menu_when_hermes_target_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            hermes_auth = base / "hermes-state" / "auth.json"
+            root.mkdir(parents=True, exist_ok=True)
+            hermes_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(root / "openai-hub-state.json", {})
+            MODULE.write_json(
+                hermes_auth,
+                {
+                    "version": 1,
+                    "active_provider": "openai-codex",
+                    "providers": {
+                        "openai-codex": {
+                            "auth_mode": "chatgpt",
+                            "last_refresh": "2026-04-15T00:00:00Z",
+                            "tokens": {
+                                "access_token": "live-access",
+                                "refresh_token": "live-refresh",
+                            },
+                        }
+                    },
+                },
+            )
+            MODULE.set_init_status(root, completed=True, verified=True)
+
+            original_variant = MODULE.APP_VARIANT
+            original_hermes_auth = getattr(MODULE, "HERMES_AUTH_FILE", None)
+            try:
+                setattr(MODULE, "APP_VARIANT", "hermes")
+                setattr(MODULE, "HERMES_AUTH_FILE", hermes_auth)
+
+                ready = MODULE.ensure_environment_ready_for_menu(
+                    root=root,
+                    initialize_fn=lambda **kwargs: MODULE.initialize_environment(
+                        openclaw_program_probe_fn=lambda: False,
+                        opencode_program_probe_fn=lambda: False,
+                        switch_target_probe_fn=lambda *_args, **_kwargs: None,
+                        **kwargs,
+                    ),
+                    verify_fn=lambda **kwargs: MODULE.verify_initialized_environment(
+                        openclaw_program_probe_fn=lambda: False,
+                        opencode_program_probe_fn=lambda: False,
+                        switch_target_probe_fn=lambda *_args, **_kwargs: None,
+                        **kwargs,
+                    ),
+                    run_with_loading_fn=run_with_loading_stub,
+                    show_error_fn=lambda *_args, **_kwargs: None,
+                    show_success_fn=lambda *_args, **_kwargs: None,
+                )
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                if original_hermes_auth is None:
+                    delattr(MODULE, "HERMES_AUTH_FILE")
+                else:
+                    setattr(MODULE, "HERMES_AUTH_FILE", original_hermes_auth)
+
+        self.assertTrue(ready)
+
+    def test_full_mode_blocks_menu_when_hermes_switch_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "openclaw-root"
+            agents_dir = root / "agents" / "main" / "agent"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            (root / "openclaw.json").write_text(
+                '{"models":{"providers":{"openai-codex":{"models":[{"id":"gpt-5.4-codex"}]}}}}\n',
+                encoding="utf-8",
+            )
+            (agents_dir / "models.json").write_text(
+                '{"providers":{"openai-codex":{"models":[{"id":"gpt-5.4-codex"}]}}}\n',
+                encoding="utf-8",
+            )
+            (agents_dir / "auth.json").write_text("{}\n", encoding="utf-8")
+            (agents_dir / "auth-profiles.json").write_text(
+                '{"version":1,"profiles":{},"lastGood":{},"usageStats":{}}\n',
+                encoding="utf-8",
+            )
+            opencode_auth = base / "opencode-state" / "auth.json"
+            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
+            opencode_auth.write_text("{}\n", encoding="utf-8")
+            hermes_auth = base / "hermes-state" / "auth.json"
+            hermes_auth.parent.mkdir(parents=True, exist_ok=True)
+            MODULE.write_json(
+                hermes_auth,
+                {
+                    "version": 1,
+                    "active_provider": "openai-codex",
+                    "providers": {"openai-codex": {"auth_mode": "chatgpt", "tokens": {}}},
+                },
+            )
+            MODULE.set_init_status(root, completed=True, verified=True)
+            errors: list[tuple[str, str | None]] = []
+
+            original_variant = MODULE.APP_VARIANT
+            original_hermes_auth = getattr(MODULE, "HERMES_AUTH_FILE", None)
+            try:
+                setattr(MODULE, "APP_VARIANT", "full")
+                setattr(MODULE, "HERMES_AUTH_FILE", hermes_auth)
+                ready = MODULE.ensure_environment_ready_for_menu(
+                    root=root,
+                    opencode_auth_path=opencode_auth,
+                    initialize_fn=lambda **kwargs: MODULE.initialize_environment(
+                        openclaw_program_probe_fn=lambda: True,
+                        opencode_program_probe_fn=lambda: True,
+                        openclaw_provider_probe_fn=lambda _provider_id=MODULE.PROVIDER_KEY: True,
+                        switch_target_probe_fn=lambda *_args, **_kwargs: MODULE.build_init_failure(
+                            "hermes-switch-target-unavailable",
+                            hermes_auth,
+                        ),
+                        **kwargs,
+                    ),
+                    verify_fn=lambda **kwargs: MODULE.verify_initialized_environment(
+                        openclaw_program_probe_fn=lambda: True,
+                        opencode_program_probe_fn=lambda: True,
+                        openclaw_provider_probe_fn=lambda _provider_id=MODULE.PROVIDER_KEY: True,
+                        switch_target_probe_fn=lambda *_args, **_kwargs: MODULE.build_init_failure(
+                            "hermes-switch-target-unavailable",
+                            hermes_auth,
+                        ),
+                        **kwargs,
+                    ),
+                    run_with_loading_fn=run_with_loading_stub,
+                    show_error_fn=lambda message, detail=None: errors.append((message, detail)),
+                    show_success_fn=lambda *_args, **_kwargs: None,
+                )
+            finally:
+                setattr(MODULE, "APP_VARIANT", original_variant)
+                if original_hermes_auth is None:
+                    delattr(MODULE, "HERMES_AUTH_FILE")
+                else:
+                    setattr(MODULE, "HERMES_AUTH_FILE", original_hermes_auth)
+
+        self.assertFalse(ready)
+        self.assertTrue(errors)
+        self.assertIn("Hermes 切换目标文件", errors[-1][1] or "")
 
     def test_probe_switch_targets_writes_and_restores_real_target_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1196,199 +1771,6 @@ class InitGatekeepingTests(unittest.TestCase):
                 setattr(MODULE, "APP_VARIANT", original_variant)
 
         self.assertTrue(ready)
-
-    def test_switch_alias_in_opencode_mode_does_not_require_openclaw_runtime_token(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            base = Path(tmp_dir)
-            root = base / ".openaihub"
-            openclaw_root = base / ".openclaw"
-            opencode_auth = base / "opencode-state" / "auth.json"
-            opencode_auth.parent.mkdir(parents=True, exist_ok=True)
-            MODULE.write_json(opencode_auth, {})
-            MODULE.save_store(
-                {
-                    "version": 1,
-                    "active": "source",
-                    "accounts": {
-                        "source": {
-                            "type": "oauth",
-                            "provider": MODULE.PROVIDER_KEY,
-                            "access": "source-access",
-                            "refresh": "source-refresh",
-                            "expires": 1,
-                            "accountId": "source-account",
-                        },
-                        "target": {
-                            "type": "oauth",
-                            "provider": MODULE.PROVIDER_KEY,
-                            "access": "target-access",
-                            "refresh": "target-refresh",
-                            "expires": 2,
-                            "accountId": "target-account",
-                        },
-                    },
-                },
-                root,
-            )
-
-            original_variant = MODULE.APP_VARIANT
-            original_openclaw_root = MODULE.OPENCLAW_ROOT
-            try:
-                setattr(MODULE, "APP_VARIANT", "opencode")
-                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
-                result = MODULE.switch_alias(
-                    root, "target", opencode_auth_path=opencode_auth
-                )
-                written_auth = MODULE.read_json(opencode_auth)
-                written_store = MODULE.load_store(root)
-            finally:
-                setattr(MODULE, "APP_VARIANT", original_variant)
-                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
-
-        self.assertEqual(result["updatedAgentCount"], 0)
-        self.assertEqual(written_auth["openai"]["refresh"], "target-refresh")
-        self.assertEqual(written_store["active"], "target")
-
-    def test_cmd_usage_in_opencode_mode_uses_selected_saved_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            base = Path(tmp_dir)
-            root = base / ".openaihub"
-            openclaw_root = base / ".openclaw"
-            MODULE.save_store(
-                {
-                    "version": 1,
-                    "active": "saved",
-                    "accounts": {
-                        "saved": {
-                            "type": "oauth",
-                            "provider": MODULE.PROVIDER_KEY,
-                            "access": "saved-access",
-                            "refresh": "saved-refresh",
-                            "expires": 3,
-                            "accountId": "saved-account",
-                            "displayName": "Saved Account",
-                        }
-                    },
-                },
-                root,
-            )
-
-            original_root = MODULE.ROOT
-            original_variant = MODULE.APP_VARIANT
-            original_openclaw_root = MODULE.OPENCLAW_ROOT
-            original_fetch = MODULE.fetch_codex_usage
-            output = io.StringIO()
-            try:
-                setattr(MODULE, "ROOT", root)
-                setattr(MODULE, "APP_VARIANT", "opencode")
-                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
-                setattr(
-                    MODULE,
-                    "fetch_codex_usage",
-                    lambda profile: {
-                        "plan": "team",
-                        "windows": [
-                            {"label": "5h", "usedPercent": 12.0, "resetAt": None}
-                        ],
-                    },
-                )
-                with redirect_stdout(output):
-                    exit_code = MODULE.cmd_usage()
-            finally:
-                setattr(MODULE, "ROOT", original_root)
-                setattr(MODULE, "APP_VARIANT", original_variant)
-                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
-                setattr(MODULE, "fetch_codex_usage", original_fetch)
-
-        self.assertEqual(exit_code, 0)
-        self.assertIn("Saved Account", output.getvalue())
-        self.assertIn("saved-account", output.getvalue())
-
-    def test_detect_current_alias_in_opencode_mode_uses_selected_saved_alias(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            base = Path(tmp_dir)
-            root = base / ".openaihub"
-            MODULE.save_store(
-                {
-                    "version": 1,
-                    "active": "selected",
-                    "accounts": {
-                        "selected": {
-                            "type": "oauth",
-                            "provider": MODULE.PROVIDER_KEY,
-                            "access": "selected-access",
-                            "refresh": "selected-refresh",
-                            "expires": 4,
-                            "accountId": "selected-account",
-                        }
-                    },
-                },
-                root,
-            )
-
-            original_variant = MODULE.APP_VARIANT
-            try:
-                setattr(MODULE, "APP_VARIANT", "opencode")
-                alias = MODULE.detect_current_alias(root)
-            finally:
-                setattr(MODULE, "APP_VARIANT", original_variant)
-
-        self.assertEqual(alias, "selected")
-
-    def test_cmd_save_in_opencode_mode_uses_selected_saved_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            base = Path(tmp_dir)
-            root = base / ".openaihub"
-            openclaw_root = base / ".openclaw"
-            MODULE.save_store(
-                {
-                    "version": 1,
-                    "active": "selected",
-                    "accounts": {
-                        "selected": {
-                            "type": "oauth",
-                            "provider": MODULE.PROVIDER_KEY,
-                            "access": "selected-access",
-                            "refresh": "selected-refresh",
-                            "expires": 5,
-                            "accountId": "selected-account",
-                            "displayName": "Selected Account",
-                        }
-                    },
-                },
-                root,
-            )
-
-            original_root = MODULE.ROOT
-            original_variant = MODULE.APP_VARIANT
-            original_openclaw_root = MODULE.OPENCLAW_ROOT
-            output = io.StringIO()
-            try:
-                setattr(MODULE, "ROOT", root)
-                setattr(MODULE, "APP_VARIANT", "opencode")
-                setattr(MODULE, "OPENCLAW_ROOT", openclaw_root)
-                with redirect_stdout(output):
-                    exit_code = MODULE.cmd_save("snapshot")
-                written_store = MODULE.load_store(root)
-            finally:
-                setattr(MODULE, "ROOT", original_root)
-                setattr(MODULE, "APP_VARIANT", original_variant)
-                setattr(MODULE, "OPENCLAW_ROOT", original_openclaw_root)
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(written_store["active"], "snapshot")
-        self.assertEqual(
-            written_store["accounts"]["snapshot"]["accountId"], "selected-account"
-        )
-        self.assertEqual(
-            written_store["accounts"]["snapshot"]["refresh"], "selected-refresh"
-        )
-        self.assertIn("已保存账号别名：snapshot", output.getvalue())
-        self.assertIn("selected-account", output.getvalue())
 
     def test_full_mode_allows_menu_when_openclaw_program_not_installed_but_paths_valid(
         self,

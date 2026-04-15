@@ -24,7 +24,7 @@ import unicodedata
 from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Iterator, Mapping, TextIO
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -91,6 +91,32 @@ OPENCODE_CONFIG_ROOT = default_opencode_config_root()
 OPENCODE_CONFIG_FILE = OPENCODE_CONFIG_ROOT / "opencode.json"
 OPENCODE_AUTH_FILE = resolve_opencode_auth_file()
 OPENCODE_STATE_ROOT = OPENCODE_AUTH_FILE.parent
+
+
+def default_hermes_root() -> Path:
+    hermes_home_override = str(os.environ.get("HERMES_HOME") or "").strip()
+    if hermes_home_override:
+        return Path(hermes_home_override).expanduser()
+    hermes_auth_override = str(os.environ.get("HERMES_AUTH_FILE") or "").strip()
+    if hermes_auth_override:
+        return Path(hermes_auth_override).expanduser().resolve().parent
+    if os.name == "nt":
+        distro = str(os.environ.get("HERMES_WSL_DISTRO") or "HermesUbuntu").strip() or "HermesUbuntu"
+        return Path(f"\\\\wsl$\\{distro}\\root\\.hermes")
+    return Path.home() / ".hermes"
+
+
+def resolve_hermes_auth_file() -> Path:
+    hermes_auth_override = str(os.environ.get("HERMES_AUTH_FILE") or "").strip()
+    if hermes_auth_override:
+        return Path(hermes_auth_override).expanduser()
+    return default_hermes_root() / "auth.json"
+
+
+HERMES_ROOT = default_hermes_root()
+HERMES_CONFIG_FILE = HERMES_ROOT / "config.yaml"
+HERMES_AUTH_FILE = resolve_hermes_auth_file()
+HERMES_STATE_ROOT = HERMES_AUTH_FILE.parent
 AUDIT_LOG_DIR = ROOT / "logs"
 SWITCH_AUDIT_LOG_FILE = AUDIT_LOG_DIR / "switch-events.jsonl"
 PROFILE_KEY = "openai-codex:default"
@@ -147,7 +173,7 @@ HOME_PANEL_TITLE = "账号中心"
 PANEL_CONTENT_WIDTH = 72
 PANEL_WIDTH = PANEL_CONTENT_WIDTH + 4
 DEFAULT_WINDOW_COLS = 80
-DEFAULT_WINDOW_LINES = 33
+DEFAULT_WINDOW_LINES = 34
 TARGET_OPENCLAW_MODEL_ID = "gpt-5.4-codex"
 TARGET_OPENCLAW_MODEL_NAME = "GPT-5.4 Codex"
 TARGET_OPENCLAW_MODEL_ALIAS = "gpt54"
@@ -155,11 +181,12 @@ TARGET_OPENCODE_MODEL_KEY = "gpt-5.4"
 TARGET_OPENCODE_MODEL_NAME = "GPT 5.4 (OAuth)"
 INIT_VERSION = "local-init-v1"
 AUTO_REFRESH_INTERVAL_MS = 180 * 1000
+IDLE_ACCOUNT_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 MENU_IDLE_TICK_MS = 60
 DASHBOARD_REQUEST_TIMEOUT_SECONDS = 20
 DASHBOARD_AUTH_ERROR_GRACE_ATTEMPTS = 3
 DASHBOARD_AUTH_HARD_FAILURE_COOLDOWN_MS = 15 * 60 * 1000
-DASHBOARD_MAX_BACKGROUND_REFRESHES_PER_CYCLE = 1
+DASHBOARD_MAX_BACKGROUND_REFRESHES_PER_CYCLE = 2
 DASHBOARD_DAILY_FULL_REFRESH_MS = 24 * 60 * 60 * 1000
 DASHBOARD_7D_RESET_REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000
 DASHBOARD_5H_LOW_REFRESH_THRESHOLD = 50.0
@@ -218,8 +245,12 @@ def variant_is_opencode() -> bool:
     return get_app_variant() in {"full", "opencode"}
 
 
+def variant_is_hermes() -> bool:
+    return get_app_variant() in {"full", "hermes"}
+
+
 def variant_requires_openclaw_login() -> bool:
-    return get_app_variant() in {"full", "openclaw", "opencode"}
+    return get_app_variant() in {"full", "openclaw"}
 
 
 def variant_requires_opencode_config() -> bool:
@@ -228,6 +259,10 @@ def variant_requires_opencode_config() -> bool:
 
 def variant_requires_local_openclaw_install() -> bool:
     return get_app_variant() in {"full", "openclaw"}
+
+
+def variant_requires_hermes_auth() -> bool:
+    return get_app_variant() in {"full", "hermes"}
 
 
 stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -295,9 +330,13 @@ def read_json(path: Path) -> JsonDict:
 
 def write_json(path: Path, data: JsonDict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(str(tmp_path), str(path))
 
 
 def append_jsonl(path: Path, data: JsonDict) -> None:
@@ -463,7 +502,7 @@ def choose_runtime_variant() -> str:
             {
                 "key": "full",
                 "label": "综合模式",
-                "description": "检查 OpenClAW + OpenCode，切号时两边一起切",
+                "description": "检查 OpenClAW + OpenCode + Hermes，切号时全部一起切",
             },
             {
                 "key": "opencode",
@@ -474,6 +513,11 @@ def choose_runtime_variant() -> str:
                 "key": "openclaw",
                 "label": "OpenClAW 模式",
                 "description": "只检查 OpenClAW，切号时只改 OpenClAW",
+            },
+            {
+                "key": "hermes",
+                "label": "Hermes 模式",
+                "description": "只检查 Hermes，切号时只改 Hermes",
             },
         ],
         hint="先选择运行模式，再进入初始化与主菜单；Esc 可直接退出",
@@ -591,6 +635,19 @@ def get_window_remaining_value(row: JsonDict, label: str) -> float | None:
     return remaining.get(normalized_label)
 
 
+def has_complete_quota_windows(windows: list[JsonDict] | None) -> bool:
+    labels = {
+        str(window.get("label") or "").strip().lower()
+        for window in list(windows or [])
+        if isinstance(window, dict)
+    }
+    return "5h" in labels and "7d" in labels
+
+
+def row_has_complete_quota_windows(row: JsonDict) -> bool:
+    return has_complete_quota_windows(row.get("windows") or [])
+
+
 def get_required_7d_remaining_for_5h(remaining_5h: float | None) -> float | None:
     if remaining_5h is None:
         return None
@@ -634,6 +691,8 @@ def compute_dashboard_row_next_refresh_at(
     daily_success_day = str(row.get("_dailyRefreshSuccessDay") or "")
     if daily_success_day != current_local_day_key(now):
         return now
+    if not row_has_complete_quota_windows(row):
+        return now + AUTO_REFRESH_INTERVAL_MS
 
     if (
         isinstance(reset_7d, int)
@@ -646,11 +705,14 @@ def compute_dashboard_row_next_refresh_at(
     ):
         return now + AUTO_REFRESH_INTERVAL_MS
     if isinstance(reset_7d, int):
-        return max(
-            now + AUTO_REFRESH_INTERVAL_MS,
-            reset_7d - DASHBOARD_7D_RESET_REFRESH_THRESHOLD_MS,
+        return min(
+            now + IDLE_ACCOUNT_REFRESH_INTERVAL_MS,
+            max(
+                now + AUTO_REFRESH_INTERVAL_MS,
+                reset_7d - DASHBOARD_7D_RESET_REFRESH_THRESHOLD_MS,
+            ),
         )
-    return now + DASHBOARD_DAILY_FULL_REFRESH_MS
+    return now + IDLE_ACCOUNT_REFRESH_INTERVAL_MS
 
 
 def get_dashboard_row_refresh_priority(row: JsonDict) -> tuple[int, float, int]:
@@ -720,6 +782,8 @@ def can_row_participate_in_auto_switch(row: JsonDict) -> bool:
     if row.get("error"):
         return False
     if row_has_auth_issue_warning(row):
+        return False
+    if not row_has_complete_quota_windows(row):
         return False
     return bool(row.get("alias"))
 
@@ -803,7 +867,7 @@ def build_auto_switch_decision(
     if current_row.get("error"):
         current_reason = "current-error"
     elif current_remaining_7d is None or current_remaining_5h is None:
-        current_reason = "current-missing-quota"
+        return None
     elif float(current_remaining_7d) < float(min_7d_remaining):
         current_reason = "current-7d-below-threshold"
     elif float(current_remaining_5h) < float(min_5h_remaining):
@@ -1229,6 +1293,8 @@ def get_home_mode_label() -> str:
         return "OpenCode 模式"
     if variant == "openclaw":
         return "OpenClAW 模式"
+    if variant == "hermes":
+        return "Hermes 模式"
     return "综合模式"
 
 
@@ -2049,6 +2115,23 @@ def agent_sessions_file(adir: Path) -> Path:
 
 
 def extract_current_profile(root: Path = ROOT) -> JsonDict:
+    if not variant_is_openclaw() and not variant_is_opencode() and variant_is_hermes():
+        auth = read_json(HERMES_AUTH_FILE)
+        profile = extract_hermes_profile_from_auth(auth)
+        if isinstance(profile, dict) and profile.get("refresh"):
+            return profile
+        raise ValueError(f"找不到 Hermes 当前登录凭据：{HERMES_AUTH_FILE}")
+    if not variant_is_openclaw() and variant_is_opencode():
+        auth = read_json(OPENCODE_AUTH_FILE)
+        profile = auth.get("openai") if isinstance(auth, dict) else None
+        if (
+            isinstance(profile, dict)
+            and profile.get("type") == "oauth"
+            and profile.get("refresh")
+        ):
+            return normalize_saved_profile(profile)
+        raise ValueError(f"找不到 OpenCode 当前登录凭据：{OPENCODE_AUTH_FILE}")
+
     for adir in agent_dirs(root):
         ap = read_json(adir / "auth-profiles.json")
         profile = ap.get("profiles", {}).get(PROFILE_KEY)
@@ -2312,9 +2395,15 @@ def build_init_failure_detail(reason: str, target_path: Path | None = None) -> s
         return f"找不到 OpenCode 凭据文件。{path_text}\n建议目录：{OPENCODE_AUTH_FILE}\n请确认 OpenCode 状态目录存在，然后重新启动程序。"
     if reason == "opencode-state-dir-missing":
         return f"找不到 OpenCode 状态目录。{path_text}\n建议目录：{OPENCODE_STATE_ROOT}\n请先启动一次 OpenCode 或确认状态目录已存在，然后重新检测。"
+    if reason == "hermes-auth-missing":
+        return f"找不到 Hermes 凭据文件。{path_text}\n建议目录：{HERMES_AUTH_FILE}\n请先完成 Hermes 登录，或确认 auth.json 已生成后，再重新启动程序。"
+    if reason == "hermes-state-dir-missing":
+        return f"找不到 Hermes 状态目录。{path_text}\n建议目录：{HERMES_STATE_ROOT}\n请先确认 Hermes 已安装并完成首次配置，然后重新检测。"
+    if reason == "hermes-switch-target-unavailable":
+        return f"Hermes 切换目标文件当前不可用，程序无法确认后续切号能成功写入。{path_text}\n请检查该目录/文件是否可读、可写、未被占用，并确认 WSL 共享路径可正常访问。"
     if reason == "init-marker-missing":
         return f"环境文件存在，但初始化标记未写入。{path_text}\n程序会自动重新初始化；如果反复出现，请检查配置文件写入权限。"
-    return f"初始化验证失败。{path_text}\n请检查 OpenClAW / OpenCode 目录是否可写，然后重新启动程序。"
+    return f"初始化验证失败。{path_text}\n请检查 OpenClAW / OpenCode / Hermes 目录是否可写，然后重新启动程序。"
 
 
 def build_init_failure(reason: str, target_path: Path | None = None) -> JsonDict:
@@ -2330,6 +2419,7 @@ def detect_init_hard_failure(
     openclaw_config_path: Path,
     opencode_config_path: Path,
     opencode_auth_path: Path,
+    hermes_auth_path: Path,
     openclaw_program_probe_fn: Callable[[], bool],
     opencode_program_probe_fn: Callable[[], bool],
     openclaw_provider_probe_fn: Callable[[str], bool],
@@ -2344,12 +2434,20 @@ def detect_init_hard_failure(
         state_dir = opencode_auth_path.parent
         if not state_dir.exists() or not state_dir.is_dir():
             return build_init_failure("opencode-state-dir-missing", state_dir)
+    if variant_requires_hermes_auth():
+        state_dir = hermes_auth_path.parent
+        if not state_dir.exists() or not state_dir.is_dir():
+            return build_init_failure("hermes-state-dir-missing", state_dir)
     return None
 
 
 def describe_switch_target_scope() -> str:
+    if variant_is_openclaw() and variant_is_opencode() and variant_is_hermes():
+        return "OpenClAW + OpenCode + Hermes"
     if variant_is_openclaw() and variant_is_opencode():
         return "OpenClAW + OpenCode"
+    if variant_is_hermes():
+        return "Hermes"
     if variant_is_opencode():
         return "OpenCode"
     return "OpenClAW"
@@ -2522,9 +2620,96 @@ def probe_opencode_switch_target(auth_path: Path) -> None:
         raise ValueError("OpenCode auth.json 恢复失败")
 
 
+def extract_hermes_profile_from_auth(auth_data: JsonDict) -> JsonDict | None:
+    providers = auth_data.get("providers") if isinstance(auth_data, dict) else None
+    provider = providers.get("openai-codex") if isinstance(providers, dict) else None
+    tokens = provider.get("tokens") if isinstance(provider, dict) else None
+    refresh_token = str((tokens or {}).get("refresh_token") or "")
+    if not refresh_token:
+        return None
+    return normalize_saved_profile(
+        {
+            "type": "oauth",
+            "provider": PROVIDER_KEY,
+            "access": str((tokens or {}).get("access_token") or ""),
+            "refresh": refresh_token,
+            "expires": 0,
+            "accountId": str((provider or {}).get("accountId") or ""),
+        }
+    )
+
+
+def build_hermes_credential_pool_entry(profile: JsonDict, existing: JsonDict | None = None) -> JsonDict:
+    current = existing if isinstance(existing, dict) else {}
+    account_id = str(profile.get("accountId") or "")
+    display_name = str(profile.get("displayName") or account_id or "openai-codex")
+    return {
+        "id": account_id or "openai-codex",
+        "label": display_name,
+        "auth_type": str(current.get("auth_type") or "oauth"),
+        "priority": int(current.get("priority") or 0),
+        "source": str(current.get("source") or "openaihub"),
+        "access_token": profile.get("access", ""),
+        "refresh_token": profile.get("refresh", ""),
+        "last_status": current.get("last_status"),
+        "last_status_at": current.get("last_status_at"),
+        "last_error_code": current.get("last_error_code"),
+        "last_error_reason": current.get("last_error_reason"),
+        "last_error_message": current.get("last_error_message"),
+        "last_error_reset_at": current.get("last_error_reset_at"),
+        "base_url": str(current.get("base_url") or "https://chatgpt.com/backend-api/codex"),
+        "last_refresh": now_iso(),
+        "request_count": int(current.get("request_count") or 0),
+    }
+
+
+def probe_hermes_switch_target(auth_path: Path) -> None:
+    original_auth_bytes = auth_path.read_bytes()
+    original_auth = read_json_object_strict(auth_path)
+    probe_profile = build_init_probe_profile()
+
+    with auth_path.open("r+", encoding="utf-8"):
+        pass
+
+    probe_auth = copy.deepcopy(original_auth)
+    providers = probe_auth.setdefault("providers", {})
+    provider = providers.get("openai-codex")
+    if not isinstance(provider, dict):
+        provider = {}
+    provider["auth_mode"] = str(provider.get("auth_mode") or "chatgpt")
+    provider["last_refresh"] = now_iso()
+    provider["tokens"] = {
+        "access_token": probe_profile.get("access", ""),
+        "refresh_token": probe_profile.get("refresh", ""),
+    }
+    providers["openai-codex"] = provider
+    probe_auth["active_provider"] = "openai-codex"
+    probe_auth["updated_at"] = now_iso()
+    credential_pool = probe_auth.setdefault("credential_pool", {})
+    pool_entries = credential_pool.get("openai-codex")
+    existing_entry = pool_entries[0] if isinstance(pool_entries, list) and pool_entries else None
+    credential_pool["openai-codex"] = [
+        build_hermes_credential_pool_entry(probe_profile, existing_entry)
+    ]
+    probe_auth.setdefault("version", 1)
+
+    try:
+        write_json(auth_path, probe_auth)
+        written_auth = read_json_object_strict(auth_path)
+        written_profile = extract_hermes_profile_from_auth(written_auth)
+        if not isinstance(written_profile, dict) or str(written_profile.get("refresh") or "") != probe_profile["refresh"]:
+            raise ValueError("Hermes auth.json 测试写入回读失败")
+    finally:
+        write_bytes_atomic(auth_path, original_auth_bytes)
+
+    if auth_path.read_bytes() != original_auth_bytes:
+        raise ValueError("Hermes auth.json 恢复失败")
+
+
 def probe_switch_targets(
     root: Path = ROOT,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+    hermes_auth_path: Path = HERMES_AUTH_FILE,
 ) -> JsonDict | None:
     if variant_is_openclaw():
         for adir in agent_dirs(root):
@@ -2540,6 +2725,13 @@ def probe_switch_targets(
         except Exception:
             return build_init_failure(
                 "opencode-switch-target-unavailable", opencode_auth_path
+            )
+    if variant_is_hermes():
+        try:
+            probe_hermes_switch_target(hermes_auth_path)
+        except Exception:
+            return build_init_failure(
+                "hermes-switch-target-unavailable", hermes_auth_path
             )
     return None
 
@@ -2599,11 +2791,12 @@ def verify_initialized_environment(
     openclaw_config_path: Path | None = None,
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+    hermes_auth_path: Path = HERMES_AUTH_FILE,
     require_marker: bool = True,
     openclaw_program_probe_fn: Callable[[], bool] | None = None,
     opencode_program_probe_fn: Callable[[], bool] | None = None,
     openclaw_provider_probe_fn: Callable[[str], bool] | None = None,
-    switch_target_probe_fn: Callable[[Path, Path], JsonDict | None] | None = None,
+    switch_target_probe_fn: Callable[[Path, Path, Path], JsonDict | None] | None = None,
 ) -> JsonDict:
     resolved_openclaw_config_path = openclaw_config_path or root_openclaw_config_file(
         root
@@ -2613,6 +2806,7 @@ def verify_initialized_environment(
         resolved_openclaw_config_path,
         opencode_config_path,
         opencode_auth_path,
+        hermes_auth_path,
         openclaw_program_probe_fn or is_openclaw_program_installed,
         opencode_program_probe_fn or is_opencode_program_installed,
         openclaw_provider_probe_fn or official_provider_available_local,
@@ -2626,9 +2820,12 @@ def verify_initialized_environment(
     if variant_requires_opencode_config():
         if not opencode_auth_path.exists():
             return build_init_failure("opencode-auth-missing", opencode_auth_path)
+    if variant_requires_hermes_auth():
+        if not hermes_auth_path.exists():
+            return build_init_failure("hermes-auth-missing", hermes_auth_path)
 
     switch_target_failure = (switch_target_probe_fn or probe_switch_targets)(
-        root, opencode_auth_path
+        root, opencode_auth_path, hermes_auth_path
     )
     if switch_target_failure is not None:
         return switch_target_failure
@@ -2648,6 +2845,7 @@ def verify_initialized_environment(
         "openclaw_config_path": resolved_openclaw_config_path,
         "opencode_config_path": opencode_config_path,
         "opencode_auth_path": opencode_auth_path,
+        "hermes_auth_path": hermes_auth_path,
         "agent_model_files": model_files,
     }
 
@@ -2791,11 +2989,12 @@ def initialize_environment(
     openclaw_config_path: Path | None = None,
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+    hermes_auth_path: Path = HERMES_AUTH_FILE,
     progress_callback: Callable[[str], None] | None = None,
     openclaw_program_probe_fn: Callable[[], bool] | None = None,
     opencode_program_probe_fn: Callable[[], bool] | None = None,
     openclaw_provider_probe_fn: Callable[[str], bool] | None = None,
-    switch_target_probe_fn: Callable[[Path, Path], JsonDict | None] | None = None,
+    switch_target_probe_fn: Callable[[Path, Path, Path], JsonDict | None] | None = None,
 ) -> JsonDict:
     resolved_openclaw_config_path = openclaw_config_path or root_openclaw_config_file(
         root
@@ -2805,6 +3004,7 @@ def initialize_environment(
         resolved_openclaw_config_path,
         opencode_config_path,
         opencode_auth_path,
+        hermes_auth_path,
         openclaw_program_probe_fn or is_openclaw_program_installed,
         opencode_program_probe_fn or is_opencode_program_installed,
         openclaw_provider_probe_fn or official_provider_available_local,
@@ -2839,6 +3039,11 @@ def initialize_environment(
             progress_callback("步骤 4/5 检查 OpenCode 认证状态")
         resolved_opencode_config_path = opencode_config_path
         resolved_opencode_auth_path = opencode_auth_path
+    resolved_hermes_auth_path = hermes_auth_path
+    if variant_requires_hermes_auth():
+        if progress_callback is not None:
+            progress_callback("步骤 4/5 检查 Hermes 认证状态")
+        resolved_hermes_auth_path = hermes_auth_path
     if progress_callback is not None:
         progress_callback("步骤 5/5 验证初始化结果")
     verification = verify_initialized_environment(
@@ -2846,6 +3051,7 @@ def initialize_environment(
         openclaw_config_path=resolved_openclaw_config_path,
         opencode_config_path=resolved_opencode_config_path,
         opencode_auth_path=resolved_opencode_auth_path,
+        hermes_auth_path=resolved_hermes_auth_path,
         require_marker=False,
         openclaw_program_probe_fn=openclaw_program_probe_fn,
         opencode_program_probe_fn=opencode_program_probe_fn,
@@ -2858,6 +3064,7 @@ def initialize_environment(
         openclaw_config_path=resolved_openclaw_config_path,
         opencode_config_path=resolved_opencode_config_path,
         opencode_auth_path=resolved_opencode_auth_path,
+        hermes_auth_path=resolved_hermes_auth_path,
         openclaw_program_probe_fn=openclaw_program_probe_fn,
         opencode_program_probe_fn=opencode_program_probe_fn,
         openclaw_provider_probe_fn=openclaw_provider_probe_fn,
@@ -2868,6 +3075,7 @@ def initialize_environment(
         "openclaw_config_path": resolved_openclaw_config_path,
         "opencode_config_path": resolved_opencode_config_path,
         "opencode_auth_path": resolved_opencode_auth_path,
+        "hermes_auth_path": resolved_hermes_auth_path,
         "agent_model_files": agent_model_files,
         "agent_count": len(agent_model_files),
         "verification": verification,
@@ -2879,6 +3087,7 @@ def ensure_environment_ready_for_menu(
     openclaw_config_path: Path | None = None,
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+    hermes_auth_path: Path = HERMES_AUTH_FILE,
     verify_fn: Callable[..., JsonDict] = verify_initialized_environment,
     initialize_fn: Callable[..., JsonDict] = initialize_environment,
     run_with_loading_fn: Callable[..., Any] = run_with_loading,
@@ -2909,6 +3118,7 @@ def ensure_environment_ready_for_menu(
                 openclaw_config_path=openclaw_config_path,
                 opencode_config_path=opencode_config_path,
                 opencode_auth_path=opencode_auth_path,
+                hermes_auth_path=hermes_auth_path,
                 progress_callback=progress_callback,
             ),
             None,
@@ -2930,6 +3140,7 @@ def ensure_environment_ready_for_menu(
             openclaw_config_path=openclaw_config_path,
             opencode_config_path=opencode_config_path,
             opencode_auth_path=opencode_auth_path,
+            hermes_auth_path=hermes_auth_path,
         )
     if verification.get("ok"):
         success_detail = (
@@ -3153,13 +3364,33 @@ def profile_matches(left: JsonDict, right: JsonDict) -> bool:
     )
 
 
+def find_matching_alias_for_profile_in_accounts(
+    accounts: Mapping[str, Any], profile: JsonDict
+) -> str | None:
+    account_id = str(profile.get("accountId", "") or "")
+    refresh = str(profile.get("refresh", "") or "")
+    account_id_match: str | None = None
+    refresh_match: str | None = None
+    for alias, existing in accounts.items():
+        if not isinstance(alias, str) or not isinstance(existing, dict):
+            continue
+        normalized_existing = normalize_saved_profile(existing)
+        if profile_matches(profile, normalized_existing):
+            return alias
+        if account_id and normalized_existing.get("accountId") == account_id:
+            account_id_match = account_id_match or alias
+        if refresh and normalized_existing.get("refresh") == refresh:
+            refresh_match = refresh_match or alias
+    return account_id_match or refresh_match
+
+
 def detect_current_alias(root: Path = ROOT) -> str | None:
     current = extract_current_profile(root)
     store = load_store(root)
-    for alias, profile in store.get("accounts", {}).items():
-        if isinstance(profile, dict) and profile_matches(current, profile):
-            return alias
-    return None
+    accounts = store.get("accounts", {})
+    if not isinstance(accounts, dict):
+        return None
+    return find_matching_alias_for_profile_in_accounts(accounts, current)
 
 
 def parse_accounts_catalog(payload: JsonDict) -> list[JsonDict]:
@@ -3805,16 +4036,10 @@ def add_account_via_login_helper(
 
 def find_existing_alias_for_profile(root: Path, profile: JsonDict) -> str | None:
     store = load_store(root)
-    account_id = str(profile.get("accountId", "") or "")
-    refresh = str(profile.get("refresh", "") or "")
-    for alias, existing in store.get("accounts", {}).items():
-        if not isinstance(alias, str) or not isinstance(existing, dict):
-            continue
-        if account_id and existing.get("accountId") == account_id:
-            return alias
-        if refresh and existing.get("refresh") == refresh:
-            return alias
-    return None
+    accounts = store.get("accounts", {})
+    if not isinstance(accounts, dict):
+        return None
+    return find_matching_alias_for_profile_in_accounts(accounts, profile)
 
 
 def upsert_account_profile(
@@ -4168,6 +4393,10 @@ def fetch_codex_usage(
     return {"plan": data.get("plan_type"), "windows": windows, "raw": data}
 
 
+def format_dashboard_incomplete_quota_warning() -> str:
+    return "额度窗口不完整，已沿用上次完整数据前等待下一轮刷新"
+
+
 def fetch_account_catalog(
     profile: JsonDict,
     requests_get: Callable[..., Any] | None = None,
@@ -4274,8 +4503,18 @@ def build_dashboard_row_for_account(
     row["_refreshedThisCycle"] = True
     try:
         usage = fetch_usage_fn(profile)
+        if not has_complete_quota_windows(usage.get("windows") or []):
+            usage = fetch_usage_fn(profile)
+        usage_complete = has_complete_quota_windows(usage.get("windows") or [])
+        if not usage_complete and row_has_complete_quota_windows(previous_snapshot):
+            row["plan"] = previous_snapshot.get("plan", "未知")
+            row["windows"] = list(previous_snapshot.get("windows") or [])
+            row["groups"] = list(previous_snapshot.get("groups") or [])
+            row["warning"] = format_dashboard_incomplete_quota_warning()
+            row["_dailyRefreshSuccessDay"] = current_local_day_key(started_at_ms)
+            return row
         row["plan"] = usage.get("plan") or "未知"
-        row["windows"] = usage.get("windows") or []
+        row["windows"] = usage.get("windows") or [] if usage_complete else []
         try:
             groups = fetch_catalog_fn(profile)
         except Exception:
@@ -4291,6 +4530,8 @@ def build_dashboard_row_for_account(
             }
             for group in groups
         ]
+        if not usage_complete:
+            row["warning"] = format_dashboard_incomplete_quota_warning()
         row["_dailyRefreshSuccessDay"] = current_local_day_key(started_at_ms)
     except Exception as exc:
         formatted_error = format_dashboard_error(exc)
@@ -5183,12 +5424,14 @@ def cmd_init(
     openclaw_config_path: Path | None = None,
     opencode_config_path: Path = OPENCODE_CONFIG_FILE,
     opencode_auth_path: Path = OPENCODE_AUTH_FILE,
+    hermes_auth_path: Path = HERMES_AUTH_FILE,
 ) -> int:
     summary = initialize_environment(
         root=root,
         openclaw_config_path=openclaw_config_path,
         opencode_config_path=opencode_config_path,
         opencode_auth_path=opencode_auth_path,
+        hermes_auth_path=hermes_auth_path,
     )
     verification = summary.get("verification") if isinstance(summary, dict) else None
     if not isinstance(verification, dict) or not verification.get("ok"):
@@ -5211,6 +5454,8 @@ def cmd_init(
         print(f"- OpenCode 配置：{summary['opencode_config_path']}")
         print(f"- OpenCode 凭据路径：{summary['opencode_auth_path']}")
         print(f"- 已确保 OpenCode 模型：{TARGET_OPENCODE_MODEL_KEY}")
+    if variant_requires_hermes_auth():
+        print(f"- Hermes 凭据路径：{summary['hermes_auth_path']}")
     return 0
 
 
@@ -5522,10 +5767,44 @@ def apply_profile_to_opencode(auth_path: Path, profile: JsonDict) -> list[Path]:
     return backups
 
 
+def apply_profile_to_hermes(auth_path: Path, profile: JsonDict) -> list[Path]:
+    backups: list[Path] = []
+    auth_data = read_json(auth_path)
+    providers = auth_data.setdefault("providers", {})
+    provider = providers.get("openai-codex")
+    if not isinstance(provider, dict):
+        provider = {}
+    provider["auth_mode"] = str(provider.get("auth_mode") or "chatgpt")
+    provider["last_refresh"] = now_iso()
+    provider["tokens"] = {
+        "access_token": profile.get("access", ""),
+        "refresh_token": profile.get("refresh", ""),
+    }
+    if profile.get("accountId"):
+        provider["accountId"] = profile.get("accountId", "")
+    providers["openai-codex"] = provider
+    auth_data["active_provider"] = "openai-codex"
+    auth_data["updated_at"] = now_iso()
+    auth_data.setdefault("version", 1)
+
+    credential_pool = auth_data.setdefault("credential_pool", {})
+    existing_pool = credential_pool.get("openai-codex")
+    existing_entry = existing_pool[0] if isinstance(existing_pool, list) and existing_pool else None
+    credential_pool["openai-codex"] = [
+        build_hermes_credential_pool_entry(profile, existing_entry)
+    ]
+
+    if auth_path.exists():
+        backups.append(backup(auth_path))
+    write_json(auth_path, auth_data)
+    return backups
+
+
 def switch_alias(
     root: Path,
     alias: str,
     opencode_auth_path: Path | None = None,
+    hermes_auth_path: Path | None = None,
     audit_event: JsonDict | None = None,
     restart_openclaw_runtime_fn: Callable[[], JsonDict] | None = None,
 ) -> JsonDict:
@@ -5542,6 +5821,26 @@ def switch_alias(
         raise ValueError(f"未找到账号别名：{alias}")
     if profile.get("type") != "oauth" or not profile.get("refresh"):
         raise ValueError(f"账号凭据无效：{alias}")
+    if variant_is_opencode():
+        try:
+            current_opencode_profile = normalize_saved_profile(
+                extract_current_profile(root)
+            )
+        except Exception:
+            current_opencode_profile = None
+        if isinstance(current_opencode_profile, dict) and str(
+            current_opencode_profile.get("accountId") or ""
+        ) == str(profile.get("accountId") or ""):
+            merge_refreshed_profile(profile, current_opencode_profile)
+    if not variant_is_openclaw() and not variant_is_opencode() and variant_is_hermes():
+        try:
+            current_hermes_profile = normalize_saved_profile(extract_current_profile(root))
+        except Exception:
+            current_hermes_profile = None
+        if isinstance(current_hermes_profile, dict) and str(
+            current_hermes_profile.get("accountId") or ""
+        ) == str(profile.get("accountId") or ""):
+            merge_refreshed_profile(profile, current_hermes_profile)
 
     dirs = agent_dirs(root) if variant_is_openclaw() else []
     if variant_is_openclaw() and not dirs:
@@ -5554,6 +5853,7 @@ def switch_alias(
         "reason": "not-requested",
     }
     target_opencode_auth = opencode_auth_path or OPENCODE_AUTH_FILE
+    target_hermes_auth = hermes_auth_path or HERMES_AUTH_FILE
     payload = dict(audit_event or {})
     payload.setdefault("action", "account-switch")
     payload.setdefault("mode", "direct")
@@ -5578,6 +5878,8 @@ def switch_alias(
             backup_paths.extend(
                 apply_profile_to_opencode(target_opencode_auth, profile)
             )
+        if variant_is_hermes():
+            backup_paths.extend(apply_profile_to_hermes(target_hermes_auth, profile))
         store["active"] = alias
         save_store(store, root)
         sync_dashboard_snapshot_after_switch(root, from_alias, alias, profile)
@@ -5589,12 +5891,14 @@ def switch_alias(
         payload["status"] = "success"
         payload["backupPaths"] = [str(path) for path in backup_paths]
         payload["openclawRuntimeRestart"] = openclaw_restart
+        payload["hermesAuthPath"] = str(target_hermes_auth)
         write_switch_audit_event(payload, root)
     except Exception as exc:
         payload["status"] = "failed"
         payload["error"] = str(exc)
         payload["backupPaths"] = [str(path) for path in backup_paths]
         payload["openclawRuntimeRestart"] = openclaw_restart
+        payload["hermesAuthPath"] = str(target_hermes_auth)
         write_switch_audit_event(payload, root)
         raise
     return {
@@ -5653,6 +5957,8 @@ def cmd_switch(alias: str) -> int:
                 )
     if variant_is_opencode():
         print(f"- 已同步 OpenCode 凭据：{OPENCODE_AUTH_FILE}")
+    if variant_is_hermes():
+        print(f"- 已同步 Hermes 凭据：{HERMES_AUTH_FILE}")
     print(f"- 已记录切号日志：{switch_audit_log_file(ROOT)}")
     if variant_is_openclaw():
         print("- OpenClAW 已额外尝试重载运行时认证，目标是让当前 live 会话也吃到新账号")
@@ -5970,6 +6276,7 @@ def parser() -> argparse.ArgumentParser:
     p_init.add_argument("--openclaw-config", type=Path, default=None)
     p_init.add_argument("--opencode-config", type=Path, default=OPENCODE_CONFIG_FILE)
     p_init.add_argument("--opencode-auth", type=Path, default=OPENCODE_AUTH_FILE)
+    p_init.add_argument("--hermes-auth", type=Path, default=HERMES_AUTH_FILE)
 
     sub.add_parser("list", help="list saved aliases")
 
@@ -6024,6 +6331,7 @@ def main() -> int:
                     args.openclaw_config,
                     args.opencode_config,
                     args.opencode_auth,
+                    args.hermes_auth,
                 )
             if cmd == "list":
                 return cmd_list()
