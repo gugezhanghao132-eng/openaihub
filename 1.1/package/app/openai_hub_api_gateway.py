@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import re
 import secrets
 import threading
@@ -40,10 +41,20 @@ DEFAULT_UPSTREAM_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_API_FILE_NAME = "local-api.json"
 DEFAULT_MODELS_URL = "https://api.openai.com/v1/models"
 MODEL_DISCOVERY_CACHE_TTL_SECONDS = 300
+ANTHROPIC_TOOL_STATE_TTL_SECONDS = 1800
+DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_CODEX_USER_AGENT = (
     "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 )
 DEFAULT_CODEX_VERSION = "0.101.0"
+CLAUDE_CODE_COMPATIBILITY_PREAMBLE = (
+    "Claude Code compatibility mode: act like a strong agentic coding assistant. "
+    "When the user's request implies an obvious next step and the available tools "
+    "can do it safely, take that step instead of stopping after a restatement. "
+    "Use available tools to inspect, edit, run, and verify as needed. "
+    "After each tool result, continue to the next useful step until the task is "
+    "materially advanced, completed, blocked, or ambiguous."
+)
 
 ROOT = getattr(SWITCHER, "ROOT", Path.home() / ".openaihub")
 _background_server_lock = threading.Lock()
@@ -126,6 +137,9 @@ def summarize_gateway_config(
 
 
 def is_request_authorized(headers: Mapping[str, str], api_key: str) -> bool:
+    x_api_key = str(headers.get("x-api-key") or headers.get("X-Api-Key") or "")
+    if x_api_key and secrets.compare_digest(x_api_key.strip(), str(api_key or "")):
+        return True
     value = str(headers.get("Authorization") or headers.get("authorization") or "")
     if not value.startswith("Bearer "):
         return False
@@ -191,9 +205,382 @@ def build_codex_chat_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "input": items,
         "instructions": "\n\n".join(part for part in instructions if part).strip(),
     }
-    if payload.get("max_tokens") is not None:
-        request_body["max_output_tokens"] = int(payload.get("max_tokens") or 0)
     return request_body
+
+
+def _normalize_anthropic_content_blocks(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, dict):
+        block = dict(content)
+        if not str(block.get("type") or "").strip() and "text" in block:
+            block["type"] = "text"
+        return [block]
+    if not isinstance(content, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for item in content:
+        if isinstance(item, str):
+            if item:
+                blocks.append({"type": "text", "text": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        block = dict(item)
+        if not str(block.get("type") or "").strip() and "text" in block:
+            block["type"] = "text"
+        blocks.append(block)
+    return blocks
+
+
+def _normalize_anthropic_system(system: Any) -> str:
+    return _normalize_content_text(
+        [
+            block
+            for block in _normalize_anthropic_content_blocks(system)
+            if str(block.get("type") or "") == "text"
+        ]
+    )
+
+
+def _validate_reasoning_effort(model: str, effort: str) -> str:
+    normalized_model = str(model or "").strip().lower()
+    normalized_effort = str(effort or "").strip().lower()
+    allowed = {"none", "low", "medium", "high", "xhigh"}
+    if normalized_effort not in allowed:
+        raise ValueError(f"unsupported reasoning_effort: {effort}")
+    if normalized_effort == "none" and normalized_model == "gpt-5.3-codex":
+        raise ValueError("reasoning_effort none is not supported for gpt-5.3-codex")
+    return normalized_effort
+
+
+def _map_claude_code_effort_to_reasoning(model: str, effort: Any) -> str | None:
+    normalized_effort = str(effort or "").strip().lower()
+    if not normalized_effort:
+        return None
+    if normalized_effort == "max":
+        normalized_effort = "xhigh"
+    return _validate_reasoning_effort(model, normalized_effort)
+
+
+def _map_anthropic_thinking_to_effort(payload: Mapping[str, Any], model: str) -> str | None:
+    explicit = payload.get("reasoning_effort")
+    if explicit is not None:
+        return _validate_reasoning_effort(model, str(explicit))
+    output_config = payload.get("output_config")
+    if isinstance(output_config, dict):
+        output_effort = _map_claude_code_effort_to_reasoning(
+            model, output_config.get("effort")
+        )
+        if output_effort is not None:
+            return output_effort
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return None
+    thinking_type = str(thinking.get("type") or "").strip().lower()
+    if thinking_type == "adaptive":
+        # Claude Code treats adaptive thinking as a high-effort default when the
+        # user has not explicitly overridden the effort slider.
+        return _validate_reasoning_effort(model, "high")
+    if thinking_type and thinking_type not in {"enabled", "disabled"}:
+        return None
+    if thinking_type == "disabled":
+        return _validate_reasoning_effort(model, "none")
+    budget_tokens = int(thinking.get("budget_tokens") or 0)
+    if budget_tokens <= 0:
+        return None
+    if budget_tokens < 2048:
+        return _validate_reasoning_effort(model, "low")
+    if budget_tokens < 8192:
+        return _validate_reasoning_effort(model, "medium")
+    if budget_tokens < 20000:
+        return _validate_reasoning_effort(model, "high")
+    return _validate_reasoning_effort(model, "xhigh")
+
+
+def _flush_anthropic_text_item(
+    items: list[dict[str, Any]], role: str, text_blocks: list[str]
+) -> None:
+    if not text_blocks:
+        return
+    content_type = "output_text" if role == "assistant" else "input_text"
+    items.append(
+        {
+            "type": "message",
+            "role": role,
+            "content": [
+                {"type": content_type, "text": text}
+                for text in text_blocks
+                if str(text or "").strip()
+            ],
+        }
+    )
+    text_blocks.clear()
+
+
+def _build_codex_tools(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return []
+    normalized_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_tools.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": str(tool.get("description") or "").strip(),
+                "parameters": tool.get("input_schema")
+                if isinstance(tool.get("input_schema"), dict)
+                else {"type": "object", "properties": {}},
+            }
+        )
+    return normalized_tools
+
+
+def _map_anthropic_tool_choice(payload: Mapping[str, Any]) -> Any:
+    choice = payload.get("tool_choice")
+    if choice is None:
+        return "auto" if _build_codex_tools(payload) else "none"
+    if isinstance(choice, str):
+        normalized = str(choice).strip().lower()
+        if normalized in {"auto", "none"}:
+            return normalized
+        if normalized == "any":
+            return "required"
+        return None
+    if not isinstance(choice, dict):
+        return None
+    normalized_type = str(choice.get("type") or "").strip().lower()
+    if normalized_type in {"auto", "none"}:
+        return normalized_type
+    if normalized_type == "any":
+        return "required"
+    if normalized_type == "tool":
+        return {
+            "type": "function",
+            "name": str(choice.get("name") or "").strip(),
+        }
+    return None
+
+
+def _looks_like_claude_code_payload(payload: Mapping[str, Any]) -> bool:
+    if isinstance(payload.get("output_config"), dict):
+        return True
+    if isinstance(payload.get("context_management"), dict):
+        return True
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    thinking_type = str(thinking.get("type") or "").strip().lower()
+    return thinking_type == "adaptive"
+
+
+def _build_claude_code_task_budget_note(payload: Mapping[str, Any]) -> str:
+    output_config = payload.get("output_config")
+    if not isinstance(output_config, dict):
+        return ""
+    task_budget = output_config.get("task_budget")
+    if not isinstance(task_budget, dict):
+        return ""
+    if str(task_budget.get("type") or "").strip().lower() != "tokens":
+        return ""
+    total = task_budget.get("total")
+    remaining = task_budget.get("remaining")
+    parts: list[str] = []
+    if isinstance(total, int) and total > 0:
+        parts.append(f"total={total}")
+    if isinstance(remaining, int) and remaining >= 0:
+        parts.append(f"remaining={remaining}")
+    if not parts:
+        return ""
+    return (
+        "Task budget: "
+        + ", ".join(parts)
+        + ". Pace the work accordingly and keep making concrete progress instead of stopping after a restatement."
+    )
+
+
+def _build_codex_anthropic_instructions(payload: Mapping[str, Any]) -> str:
+    instructions = _normalize_anthropic_system(payload.get("system"))
+    if not _looks_like_claude_code_payload(payload):
+        return instructions
+    parts: list[str] = []
+    if _build_codex_tools(payload):
+        parts.append(CLAUDE_CODE_COMPATIBILITY_PREAMBLE)
+    task_budget_note = _build_claude_code_task_budget_note(payload)
+    if task_budget_note:
+        parts.append(task_budget_note)
+    if not parts:
+        return instructions
+    parts.append(instructions)
+    return "\n\n".join(
+        part for part in parts if str(part or "").strip()
+    )
+
+
+def build_codex_anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    model = str(
+        payload.get("model")
+        or getattr(SWITCHER, "TARGET_OPENCODE_MODEL_KEY", "gpt-5.4")
+    )
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("messages 不能为空")
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip() or "user"
+        if role not in {"user", "assistant"}:
+            raise ValueError(f"暂不支持的消息角色: {role}")
+        text_blocks: list[str] = []
+        for block in _normalize_anthropic_content_blocks(message.get("content")):
+            block_type = str(block.get("type") or "text").strip()
+            if block_type == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    text_blocks.append(text)
+                continue
+            if block_type == "tool_use":
+                _flush_anthropic_text_item(items, role, text_blocks)
+                call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
+                arguments = block.get("input")
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": str(block.get("name") or "").strip(),
+                        "arguments": arguments
+                        if isinstance(arguments, str)
+                        else json.dumps(arguments or {}, ensure_ascii=False),
+                    }
+                )
+                continue
+            if block_type == "tool_result":
+                _flush_anthropic_text_item(items, role, text_blocks)
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": str(block.get("tool_use_id") or "").strip(),
+                        "output": _normalize_content_text(block.get("content")),
+                    }
+                )
+                continue
+            raise ValueError(f"unsupported anthropic content block: {block_type}")
+        _flush_anthropic_text_item(items, role, text_blocks)
+    if not items:
+        raise ValueError("至少需要一条 Anthropic 消息")
+
+    request_body: dict[str, Any] = {
+        "model": model,
+        "store": False,
+        "input": items,
+        "instructions": _build_codex_anthropic_instructions(payload),
+    }
+    if payload.get("temperature") is not None:
+        request_body["temperature"] = payload.get("temperature")
+    if payload.get("top_p") is not None:
+        request_body["top_p"] = payload.get("top_p")
+    tools = _build_codex_tools(payload)
+    if tools:
+        request_body["tools"] = tools
+        request_body["parallel_tool_calls"] = True
+    tool_choice = _map_anthropic_tool_choice(payload)
+    if tool_choice is not None:
+        request_body["tool_choice"] = tool_choice
+    effort = _map_anthropic_thinking_to_effort(payload, model)
+    if effort is not None:
+        request_body["reasoning"] = {"effort": effort}
+    return request_body
+
+
+def _extract_anthropic_usage(payload: Mapping[str, Any]) -> dict[str, int]:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        response = payload.get("response")
+        if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+            usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(
+        usage.get("output_tokens") or usage.get("completion_tokens") or 0
+    )
+    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _map_codex_output_to_anthropic_content(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    output = payload.get("output")
+    if not isinstance(output, list):
+        response = payload.get("response")
+        if isinstance(response, dict) and isinstance(response.get("output"), list):
+            output = response.get("output")
+    content: list[dict[str, Any]] = []
+    if not isinstance(output, list):
+        return content
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type == "message" and str(item.get("role") or "") == "assistant":
+            item_content = item.get("content")
+            if not isinstance(item_content, list):
+                continue
+            for piece in item_content:
+                if not isinstance(piece, dict):
+                    continue
+                text = str(piece.get("text") or piece.get("output_text") or "").strip()
+                if text:
+                    content.append({"type": "text", "text": text})
+            continue
+        if item_type == "function_call":
+            arguments = item.get("arguments")
+            parsed_arguments: Any = {}
+            if isinstance(arguments, str):
+                try:
+                    parsed_arguments = json.loads(arguments)
+                except Exception:
+                    parsed_arguments = {"raw": arguments}
+            elif isinstance(arguments, dict):
+                parsed_arguments = dict(arguments)
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": str(item.get("call_id") or item.get("id") or uuid.uuid4().hex),
+                    "name": str(item.get("name") or "").strip(),
+                    "input": parsed_arguments if isinstance(parsed_arguments, dict) else {},
+                }
+            )
+    return content
+
+
+def build_anthropic_message_response(
+    payload: Mapping[str, Any], model: str
+) -> dict[str, Any]:
+    content = _map_codex_output_to_anthropic_content(payload)
+    usage = _extract_anthropic_usage(payload)
+    stop_reason = "tool_use" if any(
+        block.get("type") == "tool_use" for block in content
+    ) else "end_turn"
+    return {
+        "id": str(payload.get("id") or f"msg_{uuid.uuid4().hex}"),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": usage,
+    }
 
 
 def _extract_output_text(payload: Mapping[str, Any]) -> str:
@@ -261,6 +648,22 @@ def collect_stream_response(lines: Any) -> dict[str, Any]:
             if isinstance(response, dict):
                 completed_response = response
     if isinstance(completed_response, dict):
+        if not _extract_output_text(completed_response) and text_parts:
+            completed_response = {
+                **completed_response,
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "".join(text_parts),
+                            }
+                        ],
+                    }
+                ],
+            }
         return completed_response
     fallback_text = "".join(text_parts)
     return {
@@ -292,12 +695,436 @@ def _iter_sse_payloads(lines: Any):
         yield __import__("json").loads(data_text)
 
 
+def _iter_sse_events(lines: Any):
+    current_event = ""
+    for raw_line in lines:
+        if raw_line is None:
+            continue
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="replace")
+        else:
+            line = str(raw_line)
+        stripped = line.strip()
+        if not stripped:
+            current_event = ""
+            continue
+        if stripped.startswith("event:"):
+            current_event = stripped[6:].strip()
+            continue
+        if not stripped.startswith("data:"):
+            continue
+        data_text = stripped[5:].strip()
+        if not data_text:
+            continue
+        if data_text == "[DONE]":
+            yield current_event, data_text
+            current_event = ""
+            continue
+        payload = __import__("json").loads(data_text)
+        event_name = current_event or str(payload.get("type") or "")
+        yield event_name, payload
+        current_event = ""
+
+
 def _encode_sse_event(payload: str | Mapping[str, Any]) -> bytes:
     if isinstance(payload, str):
         data = payload
     else:
-        data = __import__("json").dumps(payload, ensure_ascii=False)
+        data = json.dumps(payload, ensure_ascii=False)
     return f"data: {data}\n\n".encode("utf-8")
+
+
+def _encode_named_sse_event(event_name: str, payload: Mapping[str, Any]) -> bytes:
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event_name}\ndata: {data}\n\n".encode("utf-8")
+
+
+def stream_anthropic_message_events(
+    lines: Any, model: str, message_id: str | None = None
+):
+    resolved_message_id = str(message_id or f"msg_{uuid.uuid4().hex}")
+    resolved_model = str(model or "")
+    completed_payload: dict[str, Any] | None = None
+    text_parts: list[str] = []
+    next_content_index = 0
+    index_by_key: dict[str, int] = {}
+    tool_index_by_item_id: dict[str, int] = {}
+    closed_indexes: set[int] = set()
+    message_started = False
+    message_stopped = False
+
+    def emit_message_start() -> bytes:
+        return _encode_named_sse_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": resolved_message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": resolved_model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            },
+        )
+
+    for event_name, payload in _iter_sse_events(lines):
+        if payload == "[DONE]":
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+            if not message_stopped:
+                message_stopped = True
+                yield _encode_named_sse_event("message_stop", {"type": "message_stop"})
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        if event_name == "response.created":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                resolved_model = str(response.get("model") or resolved_model)
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+            continue
+
+        if event_name == "response.output_item.added":
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+            item = payload.get("item")
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") != "function_call":
+                continue
+            item_id = str(item.get("id") or item.get("call_id") or "").strip()
+            call_id = str(item.get("call_id") or item.get("id") or "").strip()
+            index = next_content_index
+            next_content_index += 1
+            if item_id:
+                tool_index_by_item_id[item_id] = index
+            yield _encode_named_sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": str(item.get("name") or ""),
+                        "input": {},
+                    },
+                },
+            )
+            continue
+
+        if event_name == "response.content_part.added":
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+            output_index = int(payload.get("output_index") or 0)
+            content_index = int(payload.get("content_index") or 0)
+            key = f"{output_index}:{content_index}"
+            if key in index_by_key:
+                continue
+            index = next_content_index
+            next_content_index += 1
+            index_by_key[key] = index
+            yield _encode_named_sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            )
+            continue
+
+        if event_name in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = str(payload.get("delta") or "")
+            if not delta:
+                continue
+            text_parts.append(delta)
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+            output_index = int(payload.get("output_index") or 0)
+            content_index = int(payload.get("content_index") or 0)
+            key = f"{output_index}:{content_index}"
+            index = index_by_key.get(key)
+            if index is None:
+                index = next_content_index
+                next_content_index += 1
+                index_by_key[key] = index
+                yield _encode_named_sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+            yield _encode_named_sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "text_delta", "text": delta},
+                },
+            )
+            continue
+
+        if event_name == "response.function_call_arguments.delta":
+            item_id = str(payload.get("item_id") or "").strip()
+            index = tool_index_by_item_id.get(item_id)
+            if index is None:
+                continue
+            delta = str(payload.get("delta") or "")
+            yield _encode_named_sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": delta,
+                    },
+                },
+            )
+            continue
+
+        if event_name in {
+            "response.output_text.done",
+            "response.refusal.done",
+            "response.content_part.done",
+        }:
+            output_index = int(payload.get("output_index") or 0)
+            content_index = int(payload.get("content_index") or 0)
+            key = f"{output_index}:{content_index}"
+            index = index_by_key.get(key)
+            if index is None or index in closed_indexes:
+                continue
+            closed_indexes.add(index)
+            yield _encode_named_sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": index},
+            )
+            continue
+
+        if event_name in {
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        }:
+            item_id = ""
+            if event_name == "response.output_item.done":
+                item = payload.get("item")
+                if isinstance(item, dict):
+                    item_id = str(item.get("id") or item.get("call_id") or "").strip()
+            else:
+                item_id = str(payload.get("item_id") or "").strip()
+            index = tool_index_by_item_id.get(item_id)
+            if index is None or index in closed_indexes:
+                continue
+            closed_indexes.add(index)
+            yield _encode_named_sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": index},
+            )
+            continue
+
+        if event_name == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                completed_payload = response
+                resolved_model = str(response.get("model") or resolved_model)
+
+            if not message_started:
+                message_started = True
+                yield emit_message_start()
+
+            output_items = []
+            if isinstance(response, dict) and isinstance(response.get("output"), list):
+                output_items = response.get("output") or []
+
+            for item in output_items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "") != "function_call":
+                    continue
+                item_id = str(item.get("id") or item.get("call_id") or "").strip()
+                if item_id and item_id in tool_index_by_item_id:
+                    continue
+                call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                arguments = item.get("arguments")
+                if isinstance(arguments, str):
+                    partial_json = arguments
+                elif isinstance(arguments, dict):
+                    partial_json = json.dumps(arguments, ensure_ascii=False)
+                else:
+                    partial_json = "{}"
+                index = next_content_index
+                next_content_index += 1
+                if item_id:
+                    tool_index_by_item_id[item_id] = index
+                yield _encode_named_sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": str(item.get("name") or ""),
+                            "input": {},
+                        },
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": partial_json,
+                        },
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+                closed_indexes.add(index)
+
+            # If upstream completed without content lifecycle events, rebuild from deltas.
+            if text_parts and not index_by_key:
+                index = next_content_index
+                next_content_index += 1
+                yield _encode_named_sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": "".join(text_parts)},
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+                closed_indexes.add(index)
+
+            for index in list(index_by_key.values()):
+                if index in closed_indexes:
+                    continue
+                closed_indexes.add(index)
+                yield _encode_named_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+
+            for index in list(tool_index_by_item_id.values()):
+                if index in closed_indexes:
+                    continue
+                closed_indexes.add(index)
+                yield _encode_named_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+
+            usage = _extract_anthropic_usage(response if isinstance(response, dict) else {})
+            stop_reason = "tool_use" if tool_index_by_item_id else "end_turn"
+            if isinstance(response, dict) and str(response.get("status") or "") == "incomplete":
+                stop_reason = "max_tokens"
+            yield _encode_named_sse_event(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                    "usage": usage,
+                },
+            )
+            if not message_stopped:
+                message_stopped = True
+                yield _encode_named_sse_event("message_stop", {"type": "message_stop"})
+
+    if not message_started:
+        final_message = build_anthropic_message_response(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "".join(text_parts)}],
+                    }
+                ],
+                "usage": {},
+            },
+            resolved_model,
+        )
+        yield _encode_named_sse_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": resolved_message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": resolved_model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            },
+        )
+        for index, block in enumerate(final_message.get("content") or []):
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("type") or "") != "text":
+                continue
+            yield _encode_named_sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            )
+            yield _encode_named_sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "text_delta", "text": str(block.get("text") or "")},
+                },
+            )
+            yield _encode_named_sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": index},
+            )
+        yield _encode_named_sse_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            },
+        )
+        yield _encode_named_sse_event("message_stop", {"type": "message_stop"})
 
 
 def stream_chat_completion_chunks(
@@ -419,6 +1246,7 @@ class LocalAPIGatewayService:
         )
         self._model_cache_expires_at = 0.0
         self._model_cache_ids: list[str] = []
+        self._anthropic_tool_state: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _normalize_model_ids(candidates: list[str]) -> list[str]:
@@ -691,6 +1519,67 @@ class LocalAPIGatewayService:
             stream=True,
         )
 
+    def _purge_anthropic_tool_state(self) -> None:
+        if not self._anthropic_tool_state:
+            return
+        cutoff = time.time() - ANTHROPIC_TOOL_STATE_TTL_SECONDS
+        stale_ids = [
+            tool_use_id
+            for tool_use_id, metadata in self._anthropic_tool_state.items()
+            if float(metadata.get("created_at") or 0.0) < cutoff
+        ]
+        for tool_use_id in stale_ids:
+            self._anthropic_tool_state.pop(tool_use_id, None)
+
+    def remember_anthropic_tool_use(self, tool_use_id: str, call_id: str) -> None:
+        normalized_tool_use_id = str(tool_use_id or "").strip()
+        normalized_call_id = str(call_id or "").strip()
+        if not normalized_tool_use_id or not normalized_call_id:
+            return
+        self._purge_anthropic_tool_state()
+        self._anthropic_tool_state[normalized_tool_use_id] = {
+            "call_id": normalized_call_id,
+            "created_at": time.time(),
+        }
+
+    def resolve_anthropic_tool_call_id(self, tool_use_id: str) -> str | None:
+        normalized_tool_use_id = str(tool_use_id or "").strip()
+        if not normalized_tool_use_id:
+            return None
+        self._purge_anthropic_tool_state()
+        metadata = self._anthropic_tool_state.get(normalized_tool_use_id)
+        if not isinstance(metadata, dict):
+            return None
+        call_id = str(metadata.get("call_id") or "").strip()
+        return call_id or None
+
+    @staticmethod
+    def _raise_for_upstream_error(response: Any) -> None:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if 200 <= status_code < 300:
+            return
+        message = "upstream request failed"
+        payload_json: dict[str, Any] | None = None
+        try:
+            parsed_json = response.json()
+            if isinstance(parsed_json, dict):
+                payload_json = parsed_json
+        except Exception:
+            payload_json = None
+        if isinstance(payload_json, dict):
+            error = payload_json.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or message)
+            elif str(payload_json.get("detail") or "").strip():
+                message = str(payload_json.get("detail") or message)
+        elif str(getattr(response, "text", "") or "").strip():
+            message = str(getattr(response, "text", "") or "").strip()
+        raise GatewayHTTPError(
+            status_code or 500,
+            message,
+            payload_json if isinstance(payload_json, dict) else {},
+        )
+
     def handle_chat_completions(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         alias, profile = self._resolve_profile()
         body = build_codex_chat_request(payload)
@@ -790,6 +1679,61 @@ class LocalAPIGatewayService:
         )
 
 
+def _service_handle_anthropic_messages(
+    self: LocalAPIGatewayService, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    alias, profile = self._resolve_profile()
+    body = build_codex_anthropic_request(payload)
+    model = str(payload.get("model") or self.default_model)
+    body["model"] = model
+    body["stream"] = True
+
+    response = self._post_upstream(profile, body)
+    if int(getattr(response, "status_code", 0) or 0) == 401:
+        profile = self.switcher.refresh_openai_codex_token(profile)
+        self._save_profile(alias, profile)
+        response = self._post_upstream(profile, body)
+
+    self._raise_for_upstream_error(response)
+    payload_json = collect_stream_response(response.iter_lines())
+    result = build_anthropic_message_response(payload_json, model=model)
+    for block in result.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "") != "tool_use":
+            continue
+        tool_use_id = str(block.get("id") or "").strip()
+        if tool_use_id:
+            self.remember_anthropic_tool_use(tool_use_id, tool_use_id)
+    return result
+
+
+def _service_stream_anthropic_messages(
+    self: LocalAPIGatewayService, payload: Mapping[str, Any]
+):
+    alias, profile = self._resolve_profile()
+    body = build_codex_anthropic_request(payload)
+    model = str(payload.get("model") or self.default_model)
+    body["model"] = model
+    body["stream"] = True
+
+    response = self._post_upstream(profile, body)
+    if int(getattr(response, "status_code", 0) or 0) == 401:
+        profile = self.switcher.refresh_openai_codex_token(profile)
+        self._save_profile(alias, profile)
+        response = self._post_upstream(profile, body)
+
+    self._raise_for_upstream_error(response)
+    return stream_anthropic_message_events(
+        response.iter_lines(),
+        model=model,
+    )
+
+
+LocalAPIGatewayService.handle_anthropic_messages = _service_handle_anthropic_messages
+LocalAPIGatewayService.stream_anthropic_messages = _service_stream_anthropic_messages
+
+
 def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length") or 0)
     raw = handler.rfile.read(length) if length > 0 else b"{}"
@@ -809,6 +1753,25 @@ def _write_json(
     handler.wfile.write(body)
 
 
+def _write_anthropic_error(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    message: str,
+    error_type: str = "invalid_request_error",
+) -> None:
+    _write_json(
+        handler,
+        status_code,
+        {
+            "type": "error",
+            "error": {
+                "type": str(error_type or "invalid_request_error"),
+                "message": str(message or "request failed"),
+            },
+        },
+    )
+
+
 def _write_sse_headers(handler: BaseHTTPRequestHandler, status_code: int = 200) -> None:
     handler.send_response(status_code)
     handler.send_header("Content-Type", "text/event-stream")
@@ -822,10 +1785,18 @@ def build_handler_class(service: LocalAPIGatewayService):
         def log_message(self, format: str, *args: Any) -> None:
             return None
 
-        def _require_auth(self) -> bool:
+        def _require_auth(self, anthropic: bool = False) -> bool:
             headers = {key: value for key, value in self.headers.items()}
             if is_request_authorized(headers, service.current_api_key()):
                 return True
+            if anthropic:
+                _write_anthropic_error(
+                    self,
+                    401,
+                    "unauthorized",
+                    error_type="authentication_error",
+                )
+                return False
             _write_json(self, 401, {"error": {"message": "unauthorized"}})
             return False
 
@@ -843,13 +1814,38 @@ def build_handler_class(service: LocalAPIGatewayService):
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if not self._require_auth():
+            is_anthropic_messages = parsed.path == "/v1/messages"
+            if not self._require_auth(anthropic=is_anthropic_messages):
                 return
-            if parsed.path != "/v1/chat/completions":
+            if parsed.path not in {"/v1/chat/completions", "/v1/messages"}:
                 _write_json(self, 404, {"error": {"message": "not found"}})
                 return
             try:
                 payload = _read_request_json(self)
+                if is_anthropic_messages:
+                    anthropic_version = str(
+                        self.headers.get("anthropic-version")
+                        or self.headers.get("Anthropic-Version")
+                        or ""
+                    ).strip()
+                    if not anthropic_version:
+                        _write_anthropic_error(
+                            self,
+                            400,
+                            "anthropic-version header is required",
+                        )
+                        return
+                    if bool(payload.get("stream")):
+                        stream_iter = service.stream_anthropic_messages(payload)
+                        _write_sse_headers(self, 200)
+                        for chunk in stream_iter:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        self.close_connection = True
+                        return
+                    result = service.handle_anthropic_messages(payload)
+                    _write_json(self, 200, result)
+                    return
                 if bool(payload.get("stream")):
                     stream_iter = service.stream_chat_completions(payload)
                     _write_sse_headers(self, 200)
@@ -861,8 +1857,14 @@ def build_handler_class(service: LocalAPIGatewayService):
                 result = service.handle_chat_completions(payload)
                 _write_json(self, 200, result)
             except GatewayHTTPError as exc:
+                if is_anthropic_messages:
+                    _write_anthropic_error(self, exc.status_code, str(exc))
+                    return
                 _write_json(self, exc.status_code, {"error": {"message": str(exc)}})
             except Exception as exc:
+                if is_anthropic_messages:
+                    _write_anthropic_error(self, 400, str(exc))
+                    return
                 _write_json(self, 400, {"error": {"message": str(exc)}})
 
     return LocalAPIGatewayHandler

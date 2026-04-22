@@ -23,6 +23,32 @@
   - `npm install -g openaihub --registry https://registry.npmjs.org`
 - GitHub 页面、README、npm 说明里的公开安装命令都必须写成官方源版本，不能只写简短版。
 
+## 发布时明明有 token 但 npm 仍报 ENEEDAUTH
+
+### 现象
+
+- `token.txt` 明明存在且内容正确。
+- `npm publish` 或 `npm whoami` 仍报：
+  - `ENEEDAUTH`
+  - `This command requires you to be logged in`
+- 某些情况下还会出现：
+  - `Unknown user config "<token>"`
+
+### 根因
+
+- Windows PowerShell 如果没有显式按 UTF-8 读取 `token.txt`，可能因为中文冒号或编码差异导致正则没有正确提取 token。
+- 直接用脚本手写临时 `.npmrc` 的某些写法会被当前 npm 版本错误解析，导致 `_authToken` 没有真正生效。
+
+### 处理方式
+
+- 用显式 UTF-8 方式读取 `token.txt`。
+- 用临时 `userconfig` 文件配合：
+  - `npm config set registry https://registry.npmjs.org/ --userconfig <path>`
+  - `npm config set //registry.npmjs.org/:_authToken <token> --userconfig <path>`
+- 然后再执行：
+  - `npm whoami --registry https://registry.npmjs.org`
+  - `npm publish --access public --registry https://registry.npmjs.org`
+
 ## 发布时忘记凭据文件
 
 ### 现象
@@ -70,6 +96,31 @@
 - 确保 user 消息使用 `input_text`，assistant 消息使用 `output_text`。
 - 回归测试同步覆盖 user/assistant 两种 content type。
 
+## Claude Code 连接本地 `/v1/messages` 后无输出或先报 `max_output_tokens`
+
+### 现象
+
+- Claude Code 能连上本地 API，但提问后没有正文输出。
+- 或者先报：`Unsupported parameter: 'max_output_tokens'`。
+- 本地 `/v1/messages` 返回 200，但 `content` 为空，只剩 `usage`。
+
+### 根因
+
+- 网关曾把 Anthropic `max_tokens` 错误透传成 Codex 上游不接受的 `max_output_tokens`。
+- 真实 Codex `/responses` 流里会持续发送 `response.output_text.delta`，但 `response.completed.response.output` 可能是空数组。
+- 如果桥接层只依赖完成态 `output` 提取文本，Anthropic 响应就会丢正文，Claude Code 看起来像“卡住但没字”。
+
+### 处理方式
+
+- 检查 `1.1/package/app/openai_hub_api_gateway.py`：
+  - `build_codex_chat_request`
+  - `build_codex_anthropic_request`
+  - `collect_stream_response`
+  - `stream_anthropic_message_events`
+- 不要再向 Codex 上游透传 `max_output_tokens`。
+- 当 `response.completed.response.output` 为空但已经收到了 `response.output_text.delta` 时，必须用 delta 文本重建 assistant 输出。
+- 修改后重启正在运行的 OpenAI Hub / 本地网关进程；旧进程不会自动加载新代码。
+
 ## 状态文件损坏 (Extra data JSON 解析错误)
 
 ### 现象
@@ -115,3 +166,79 @@
   1. 先修测试隔离，避免再次污染。
   2. 再从 `~/.openaihub/openai-codex-accounts.json` 里挑选真实账号恢复到 `~/.hermes/auth.json`。
   3. 用 `https://chatgpt.com/backend-api/wham/usage` 实测当前 Hermes token，而不是只看 `hermes status`。
+
+## 2026-04 Claude Code blank first turn
+
+### Symptom
+
+- Claude Code can connect to local `/v1/messages`, but the first turn appears blank.
+- `claude -p` may show only `message_start/message_delta/message_stop`.
+- In some sessions the next tool-result turn fails with:
+  - `400 Unknown parameter: ''input[...].is_error''`
+
+### Root cause
+
+- Claude Code often starts with a `Skill` tool call, not plain text.
+- Older bridge logic did not reliably convert Codex function-call streaming events into Anthropic `tool_use` blocks.
+- The request mapper also forwarded `tool_result.is_error`, which Codex upstream rejects.
+
+### How to verify
+
+- Capture one real Claude Code request shape. Typical top-level Anthropic payload fields include:
+  - `stream: true`
+  - `tools`
+  - `thinking`
+  - `output_config`
+  - `context_management`
+- Replay that exact payload against the gateway.
+- If upstream emits only function-call events, the gateway response must still include:
+  - `content_block_start` with `type=tool_use`
+  - `content_block_delta` with `input_json_delta`
+  - `content_block_stop`
+
+### Fix
+
+- Update `stream_anthropic_message_events` so function-call-only upstream streams become Anthropic `tool_use` blocks.
+- Remove `is_error` from `function_call_output` in `build_codex_anthropic_request`.
+- Restart the running local gateway after code changes; old background processes do not hot-reload code.
+
+## 2026-04 Claude Code feels weaker on GPT/OpenAI backends
+
+### Symptom
+
+- Claude Code can connect and run, but compared with Codex/OpenCode on the same GPT model it feels less proactive or less willing to continue an agentic task by itself.
+- Users may describe this as "the model got dumber after going through the Anthropic gateway".
+
+### Root cause
+
+- `cc-haha` source shows that native Claude Code sends a richer Anthropic request than most third-party proxies preserve:
+  - `thinking`
+  - `output_config.effort`
+  - `output_config.task_budget`
+  - `context_management`
+  - beta headers
+  - prompt-caching markers such as `cache_control`
+- `cc-haha`'s own third-party-model docs explicitly say OpenAI/DeepSeek/Ollama paths usually need parameter dropping, lose extended thinking, lose prompt caching, and may have tool-calling compatibility gaps.
+- Its desktop/server OpenAI proxy only forwards a reduced subset of Anthropic fields when translating to OpenAI Chat/Responses, so even `cc-haha` itself is not a proof that third-party backends keep full Claude-native behavior.
+- Therefore the "weaker" feeling is usually not a single bug in the UI. It is a semantic loss during Anthropic -> OpenAI translation, plus the fact that Claude Code's prompting/loop is tuned for Claude-family backends rather than native OpenAI clients.
+
+### Practical takeaway
+
+- Fix obvious protocol bugs first:
+  - blank first turn
+  - missing `tool_use`
+  - dropped Claude Code effort slider
+- After the core protocol bugs are fixed, two safe best-effort improvements on Codex `/responses` are:
+  - enable `parallel_tool_calls=true` when Claude Code-compatible requests expose tools
+  - prepend a small agentic compatibility instruction for Claude Code-like payloads so GPT-style backends are less likely to stop after merely restating intent
+- Another concrete semantic mismatch from `cc-haha` source:
+  - Claude Code's adaptive-thinking path defaults to a high-effort mindset when the user has not explicitly changed the effort slider
+  - if the bridge drops that and lets Codex choose its own reasoning default, the session can feel noticeably weaker even on the same GPT model
+- Another safe best-effort compatibility layer:
+  - when Claude Code sends `output_config.task_budget`, inject a short task-budget note into Codex `instructions`
+  - this does not reproduce Anthropic-native budgeting semantics, but it preserves part of the pacing signal instead of dropping it entirely
+- Real upstream probe result:
+  - `chatgpt.com/backend-api/codex/responses` accepts `parallel_tool_calls`
+  - but a probe with `stream=false` can fail early with `400 Stream must be set to true`, so feature probes should mimic the real streaming path
+- After those are fixed, remaining differences are expected unless the bridge also models more Anthropic-native semantics.
+- "Perfectly identical to Anthropic first-party backend" is not realistic on top of Codex `/responses`; the target should be best-effort behavioral compatibility, not byte-identical parity.
