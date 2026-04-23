@@ -178,6 +178,46 @@ class LocalAPIGatewayTests(unittest.TestCase):
         self.assertEqual(translated["input"][1]["call_id"], "toolu_1")
         self.assertNotIn("is_error", translated["input"][1])
 
+    def test_build_codex_request_translates_anthropic_image_block(self) -> None:
+        gateway = load_module(
+            "openai_hub_api_gateway_anthropic_image", GATEWAY_PATH
+        )
+        payload = {
+            "model": "gpt-5.4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgo=",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+
+        translated = gateway.build_codex_anthropic_request(payload)
+
+        message = translated["input"][0]
+        self.assertEqual(message["type"], "message")
+        self.assertEqual(message["role"], "user")
+        self.assertEqual(
+            message["content"],
+            [
+                {"type": "input_text", "text": "What is in this image?"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                },
+            ],
+        )
+
     def test_build_codex_request_keeps_explicit_xhigh_reasoning_effort(self) -> None:
         gateway = load_module(
             "openai_hub_api_gateway_anthropic_reasoning_effort", GATEWAY_PATH
@@ -398,6 +438,25 @@ class LocalAPIGatewayTests(unittest.TestCase):
         self.assertEqual(result["content"][0]["text"], "hello")
         self.assertEqual(result["usage"]["input_tokens"], 10)
 
+    def test_build_anthropic_message_response_never_returns_empty_content(self) -> None:
+        gateway = load_module(
+            "openai_hub_api_gateway_anthropic_response_empty_content", GATEWAY_PATH
+        )
+        payload = {
+            "output": [],
+            "usage": {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10},
+        }
+
+        result = gateway.build_anthropic_message_response(payload, model="gpt-5.4")
+
+        self.assertEqual(result["type"], "message")
+        self.assertEqual(result["role"], "assistant")
+        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertEqual(result["content"][0]["type"], "text")
+        self.assertEqual(
+            result["content"][0]["text"], gateway.EMPTY_ASSISTANT_FALLBACK_TEXT
+        )
+
     def test_stream_anthropic_message_events_from_codex_stream(self) -> None:
         gateway = load_module("openai_hub_api_gateway_anthropic_sse", GATEWAY_PATH)
         lines = [
@@ -441,6 +500,30 @@ class LocalAPIGatewayTests(unittest.TestCase):
         self.assertIn('"text":"there"', payload.replace(" ", ""))
         self.assertIn("event: content_block_delta", payload)
         self.assertIn("event: content_block_stop", payload)
+
+    def test_stream_anthropic_message_events_never_stops_without_content_block(self) -> None:
+        gateway = load_module(
+            "openai_hub_api_gateway_anthropic_sse_empty_completion", GATEWAY_PATH
+        )
+        lines = [
+            b"event: response.created",
+            b'data: {"type":"response.created","response":{"model":"gpt-5.4"}}',
+            b"event: response.completed",
+            b'data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}}',
+        ]
+
+        payload = b"".join(
+            gateway.stream_anthropic_message_events(lines, model="gpt-5.4")
+        ).decode("utf-8")
+        compact = payload.replace(" ", "")
+
+        self.assertIn("event: message_start", payload)
+        self.assertIn("event: content_block_start", payload)
+        self.assertIn('"type":"text"', compact)
+        self.assertIn("event: content_block_delta", payload)
+        self.assertIn("event: content_block_stop", payload)
+        self.assertIn('"stop_reason":"end_turn"', compact)
+        self.assertIn("event: message_stop", payload)
 
     def test_stream_anthropic_message_events_include_tool_use_blocks(self) -> None:
         gateway = load_module("openai_hub_api_gateway_anthropic_sse_tools", GATEWAY_PATH)

@@ -55,6 +55,7 @@ CLAUDE_CODE_COMPATIBILITY_PREAMBLE = (
     "After each tool result, continue to the next useful step until the task is "
     "materially advanced, completed, blocked, or ambiguous."
 )
+EMPTY_ASSISTANT_FALLBACK_TEXT = " "
 
 ROOT = getattr(SWITCHER, "ROOT", Path.home() / ".openaihub")
 _background_server_lock = threading.Lock()
@@ -318,6 +319,38 @@ def _flush_anthropic_text_item(
     text_blocks.clear()
 
 
+def _flush_anthropic_content_item(
+    items: list[dict[str, Any]], role: str, content_parts: list[dict[str, Any]]
+) -> None:
+    if not content_parts:
+        return
+    items.append({"type": "message", "role": role, "content": list(content_parts)})
+    content_parts.clear()
+
+
+def _map_anthropic_image_block(block: Mapping[str, Any], role: str) -> dict[str, Any]:
+    if role != "user":
+        raise ValueError("anthropic image blocks are only supported for user messages")
+    source = block.get("source")
+    image_url = ""
+    if isinstance(source, dict):
+        source_type = str(source.get("type") or "").strip().lower()
+        if source_type == "base64":
+            data = str(source.get("data") or "").strip()
+            if data.startswith("data:"):
+                image_url = data
+            elif data:
+                media_type = str(source.get("media_type") or "image/png").strip()
+                image_url = f"data:{media_type};base64,{data}"
+        elif source_type == "url":
+            image_url = str(source.get("url") or "").strip()
+    if not image_url:
+        image_url = str(block.get("url") or block.get("image_url") or "").strip()
+    if not image_url:
+        raise ValueError("unsupported anthropic image source")
+    return {"type": "input_image", "image_url": image_url}
+
+
 def _build_codex_tools(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     tools = payload.get("tools")
     if not isinstance(tools, list):
@@ -438,16 +471,20 @@ def build_codex_anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         role = str(message.get("role") or "user").strip() or "user"
         if role not in {"user", "assistant"}:
             raise ValueError(f"暂不支持的消息角色: {role}")
-        text_blocks: list[str] = []
+        content_parts: list[dict[str, Any]] = []
         for block in _normalize_anthropic_content_blocks(message.get("content")):
             block_type = str(block.get("type") or "text").strip()
             if block_type == "text":
                 text = str(block.get("text") or "").strip()
                 if text:
-                    text_blocks.append(text)
+                    content_type = "output_text" if role == "assistant" else "input_text"
+                    content_parts.append({"type": content_type, "text": text})
+                continue
+            if block_type == "image":
+                content_parts.append(_map_anthropic_image_block(block, role))
                 continue
             if block_type == "tool_use":
-                _flush_anthropic_text_item(items, role, text_blocks)
+                _flush_anthropic_content_item(items, role, content_parts)
                 call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
                 arguments = block.get("input")
                 items.append(
@@ -462,7 +499,7 @@ def build_codex_anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 continue
             if block_type == "tool_result":
-                _flush_anthropic_text_item(items, role, text_blocks)
+                _flush_anthropic_content_item(items, role, content_parts)
                 items.append(
                     {
                         "type": "function_call_output",
@@ -472,7 +509,7 @@ def build_codex_anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 continue
             raise ValueError(f"unsupported anthropic content block: {block_type}")
-        _flush_anthropic_text_item(items, role, text_blocks)
+        _flush_anthropic_content_item(items, role, content_parts)
     if not items:
         raise ValueError("至少需要一条 Anthropic 消息")
 
@@ -567,6 +604,8 @@ def build_anthropic_message_response(
     payload: Mapping[str, Any], model: str
 ) -> dict[str, Any]:
     content = _map_codex_output_to_anthropic_content(payload)
+    if not content:
+        content = [{"type": "text", "text": EMPTY_ASSISTANT_FALLBACK_TEXT}]
     usage = _extract_anthropic_usage(payload)
     stop_reason = "tool_use" if any(
         block.get("type") == "tool_use" for block in content
@@ -1019,6 +1058,34 @@ def stream_anthropic_message_events(
                         "type": "content_block_delta",
                         "index": index,
                         "delta": {"type": "text_delta", "text": "".join(text_parts)},
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+                closed_indexes.add(index)
+
+            if next_content_index == 0:
+                index = next_content_index
+                next_content_index += 1
+                yield _encode_named_sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+                yield _encode_named_sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": EMPTY_ASSISTANT_FALLBACK_TEXT,
+                        },
                     },
                 )
                 yield _encode_named_sse_event(

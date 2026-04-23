@@ -43,6 +43,7 @@ Local API notes:
   - `GET /v1/models`
   - `POST /v1/chat/completions`
   - `POST /v1/messages`
+- `/v1/messages` supports Claude Code / Claude Haha screenshots via Anthropic `image` content blocks.
 
 The local API follows the current account selected in OpenAI Hub, and can reuse the existing refresh / auto-switch logic.
 
