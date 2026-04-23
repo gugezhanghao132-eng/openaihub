@@ -2,6 +2,11 @@ name: Build OpenAI Hub release assets
 
 on:
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to upload assets to, for example v1.1.27'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
@@ -45,13 +50,15 @@ jobs:
       - name: Upload Windows release asset
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          overwrite_files: true
           files: release-assets/openaihub-windows.zip
 
   build-macos:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             expected_asset: openaihub-macos-x64.tar.gz
           - runner: macos-14
             expected_asset: openaihub-macos-arm64.tar.gz
@@ -77,4 +84,6 @@ jobs:
       - name: Upload macOS release asset
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          overwrite_files: true
           files: release-assets/${{ matrix.expected_asset }}
